@@ -5,6 +5,27 @@ authors = []
 telemetry = false
 cache_dir = "./.cache"
 
+[[project.requirements]]
+contract_id = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token"
+
+[[project.requirements]]
+contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4"
+
+[[project.requirements]]
+contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4"
+
+[[project.requirements]]
+contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-pnau-decoder-v3"
+
+[[project.requirements]]
+contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-core-v4"
+
+[[project.requirements]]
+contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2"
+
+[[project.requirements]]
+contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2"
+
 # [contracts.counter]
 # path = "contracts/counter.clar"
 # epoch = "latest"
@@ -18,27 +39,12 @@ cache_dir = "./.cache"
 # More informations: https://www.hiro.so/blog/new-safety-checks-in-clarinet
 
 [repl.analysis]
-passes = ["check_checker"]
+passes = []
 check_checker = { trusted_sender = false, trusted_caller = false, callee_filter = false }
 
 [contracts]
 
-[contracts.jing]
-path = "contracts/jing.clar"
-clarity_version = 4
-epoch = "latest"
-
-[contracts.cash]
-path = "contracts/cash.clar"
-clarity_version = 4
-epoch = "latest"
-
-[contracts.yin]
-path = "contracts/yin.clar"
-clarity_version = 4
-epoch = "latest"
-
-[contracts.yang]
-path = "contracts/yang.clar"
+[contracts.blind-auction]
+path = "contracts/blind-auction.clar"
 clarity_version = 4
 epoch = "latest"
