@@ -1,12 +1,11 @@
 ;; title: blind-auction
-;; version: 0.3.0
+;; version: 0.4.0
 ;; summary: Blind batch auction for sBTC/STX swaps at synthetic oracle price
-;; description: Deposits in epoch N settle at the Pyth spot price read at
-;;   settlement time (after epoch N+1 ends). No one knows their fill price at
-;;   deposit time - zero MEV, zero slippage, pro-rata partial fills every 5 min.
-;;   Three safety gates: staleness, confidence, DEX sanity check.
-;;   settle reads stored Pyth prices (free). settle-with-refresh pushes fresh
-;;   VAAs if stored prices are stale (~2 uSTX fee).
+;; description:
+;;   8-minute cycle: 5 min deposit, 1 min buffer, 2 min settle window.
+;;   Deposits in cycle N settle during cycle N's settle window at Pyth spot price.
+;;   Unfilled remainder auto-rolls into cycle N+1.
+;;   Three safety gates: staleness, confidence, DEX sanity.
 
 ;; ============================================================================
 ;; Traits (for Pyth refresh path)
@@ -20,14 +19,22 @@
 ;; Constants
 ;; ============================================================================
 
-;; Epoch length in seconds (5 minutes)
-(define-constant EPOCH_LENGTH u300)
+;; Cycle timing (seconds)
+(define-constant CYCLE_LENGTH u480)    ;; 8 minutes
+(define-constant DEPOSIT_END u300)     ;; 0:00 - 5:00 deposit window
+(define-constant SETTLE_START u360)    ;; 6:00 settle window opens (1 min buffer)
+(define-constant SETTLE_END u480)      ;; 8:00 settle window closes
 
-;; Fee in basis points (10 = 0.10%), taken from BOTH sides
+;; Phases
+(define-constant PHASE_DEPOSIT u0)
+(define-constant PHASE_BUFFER u1)
+(define-constant PHASE_SETTLE u2)
+
+;; Fee: 10 bps (0.10%) taken from BOTH sides
 (define-constant FEE_BPS u10)
 (define-constant BPS_PRECISION u10000)
 
-;; Precision for price math (8 decimals, matches Pyth expo)
+;; Precision for price math (8 decimals, matches Pyth expo -8)
 (define-constant PRICE_PRECISION u100000000)
 
 ;; Pyth price feed IDs
@@ -35,37 +42,33 @@
 (define-constant BTC_USD_FEED 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43)
 (define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
 
-;; Maximum staleness for Pyth price (60 seconds)
-(define-constant MAX_STALENESS u60)
+;; Safety gates
+(define-constant MAX_STALENESS u60)       ;; price must be < 60s old
+(define-constant MAX_CONF_RATIO u50)      ;; conf < 2% of price (1/50)
+(define-constant MAX_DEX_DEVIATION u10)   ;; oracle vs pool < 10% (1/10)
 
-;; Confidence gate: conf must be < 2% of price (1/50)
-(define-constant MAX_CONF_RATIO u50)
-
-;; DEX sanity gate: oracle vs pool must be within 10% (1/10)
-(define-constant MAX_DEX_DEVIATION u10)
-
-;; Minimum deposit amounts (prevent dust)
+;; Minimum deposits (prevent dust)
 (define-constant MIN_STX_DEPOSIT u1000000)   ;; 1 STX
 (define-constant MIN_SBTC_DEPOSIT u1000)     ;; 0.00001 sBTC
-
-;; Errors
-(define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
-(define-constant ERR_EPOCH_NOT_FINAL (err u1002))
-(define-constant ERR_ALREADY_SETTLED (err u1003))
-(define-constant ERR_STALE_PRICE (err u1004))
-(define-constant ERR_PRICE_UNCERTAIN (err u1005))
-(define-constant ERR_PRICE_DEX_DIVERGENCE (err u1006))
-(define-constant ERR_NOTHING_TO_CLAIM (err u1007))
-(define-constant ERR_NOTHING_TO_WITHDRAW (err u1008))
-(define-constant ERR_EPOCH_LOCKED (err u1009))
-(define-constant ERR_ZERO_PRICE (err u1010))
-(define-constant ERR_PAUSED (err u1011))
-(define-constant ERR_NOT_AUTHORIZED (err u1012))
-(define-constant ERR_NOTHING_TO_SETTLE (err u1013))
 
 ;; DEX source options
 (define-constant DEX_SOURCE_XYK u1)
 (define-constant DEX_SOURCE_DLMM u2)
+
+;; Errors
+(define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
+(define-constant ERR_NOT_DEPOSIT_PHASE (err u1002))
+(define-constant ERR_NOT_SETTLE_PHASE (err u1003))
+(define-constant ERR_ALREADY_SETTLED (err u1004))
+(define-constant ERR_STALE_PRICE (err u1005))
+(define-constant ERR_PRICE_UNCERTAIN (err u1006))
+(define-constant ERR_PRICE_DEX_DIVERGENCE (err u1007))
+(define-constant ERR_NOTHING_TO_CLAIM (err u1008))
+(define-constant ERR_NOTHING_TO_WITHDRAW (err u1009))
+(define-constant ERR_ZERO_PRICE (err u1010))
+(define-constant ERR_PAUSED (err u1011))
+(define-constant ERR_NOT_AUTHORIZED (err u1012))
+(define-constant ERR_NOTHING_TO_SETTLE (err u1013))
 
 ;; ============================================================================
 ;; Data vars
@@ -74,34 +77,30 @@
 (define-data-var treasury principal tx-sender)
 (define-data-var contract-owner principal tx-sender)
 (define-data-var paused bool false)
-
-;; Admin-switchable DEX source for sanity check
-;; u1 = BitFlow XYK pool (deeper liquidity, default)
-;; u2 = BitFlow DLMM pool (concentrated, tighter spread)
 (define-data-var dex-source uint DEX_SOURCE_XYK)
 
 ;; ============================================================================
 ;; Data maps
 ;; ============================================================================
 
-;; Individual deposits per epoch per user
+;; Individual deposits per cycle per user
 (define-map stx-deposits
-  { epoch: uint, depositor: principal }
+  { cycle: uint, depositor: principal }
   uint)
 
 (define-map sbtc-deposits
-  { epoch: uint, depositor: principal }
+  { cycle: uint, depositor: principal }
   uint)
 
-;; Aggregate totals per epoch
-(define-map epoch-totals
+;; Aggregate totals per cycle (includes auto-rolled amounts)
+(define-map cycle-totals
   uint
   { total-stx: uint, total-sbtc: uint })
 
 ;; Settlement records
 (define-map settlements
   uint
-  { price: uint,               ;; settlement price in PRICE_PRECISION (STX per sBTC)
+  { price: uint,
     stx-cleared: uint,
     sbtc-cleared: uint,
     stx-fee: uint,
@@ -109,146 +108,143 @@
     settled-at: uint })
 
 ;; ============================================================================
-;; Read-only helpers
+;; Read-only: Cycle & phase helpers
 ;; ============================================================================
 
-(define-read-only (get-current-epoch)
-  (/ stacks-block-time EPOCH_LENGTH))
+(define-read-only (get-current-cycle)
+  (/ stacks-block-time CYCLE_LENGTH))
 
-(define-read-only (get-epoch-start-time (epoch uint))
-  (* epoch EPOCH_LENGTH))
+(define-read-only (get-cycle-phase)
+  (let ((elapsed (mod stacks-block-time CYCLE_LENGTH)))
+    (if (<= elapsed DEPOSIT_END) PHASE_DEPOSIT
+      (if (< elapsed SETTLE_START) PHASE_BUFFER
+        PHASE_SETTLE))))
 
-(define-read-only (get-epoch-end-time (epoch uint))
-  (* (+ epoch u1) EPOCH_LENGTH))
+(define-read-only (get-cycle-start-time (cycle uint))
+  (* cycle CYCLE_LENGTH))
 
-(define-read-only (get-epoch-totals (epoch uint))
+(define-read-only (get-cycle-totals (cycle uint))
   (default-to { total-stx: u0, total-sbtc: u0 }
-    (map-get? epoch-totals epoch)))
+    (map-get? cycle-totals cycle)))
 
-(define-read-only (get-settlement (epoch uint))
-  (map-get? settlements epoch))
+(define-read-only (get-settlement (cycle uint))
+  (map-get? settlements cycle))
 
-(define-read-only (get-stx-deposit (epoch uint) (depositor principal))
-  (default-to u0 (map-get? stx-deposits { epoch: epoch, depositor: depositor })))
+(define-read-only (get-stx-deposit (cycle uint) (depositor principal))
+  (default-to u0 (map-get? stx-deposits { cycle: cycle, depositor: depositor })))
 
-(define-read-only (get-sbtc-deposit (epoch uint) (depositor principal))
-  (default-to u0 (map-get? sbtc-deposits { epoch: epoch, depositor: depositor })))
+(define-read-only (get-sbtc-deposit (cycle uint) (depositor principal))
+  (default-to u0 (map-get? sbtc-deposits { cycle: cycle, depositor: depositor })))
 
 (define-read-only (get-dex-source)
   (var-get dex-source))
 
 ;; ============================================================================
-;; Public: Deposits
+;; Public: Deposits (only during deposit phase)
 ;; ============================================================================
 
 (define-public (deposit-stx (amount uint))
   (let (
-    (current-epoch (get-current-epoch))
-    (settle-epoch (+ current-epoch u1))
-    (existing (get-stx-deposit settle-epoch tx-sender))
-    (totals (get-epoch-totals settle-epoch))
+    (current-cycle (get-current-cycle))
+    (existing (get-stx-deposit current-cycle tx-sender))
+    (totals (get-cycle-totals current-cycle))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount MIN_STX_DEPOSIT) ERR_DEPOSIT_TOO_SMALL)
 
     (try! (stx-transfer? amount tx-sender current-contract))
 
     (map-set stx-deposits
-      { epoch: settle-epoch, depositor: tx-sender }
+      { cycle: current-cycle, depositor: tx-sender }
       (+ existing amount))
-    (map-set epoch-totals settle-epoch
+    (map-set cycle-totals current-cycle
       (merge totals { total-stx: (+ (get total-stx totals) amount) }))
 
     (print {
       event: "deposit-stx",
       depositor: tx-sender,
       amount: amount,
-      settle-epoch: settle-epoch,
+      cycle: current-cycle,
       timestamp: stacks-block-time
     })
-    (ok settle-epoch)))
+    (ok current-cycle)))
 
 (define-public (deposit-sbtc (amount uint))
   (let (
-    (current-epoch (get-current-epoch))
-    (settle-epoch (+ current-epoch u1))
-    (existing (get-sbtc-deposit settle-epoch tx-sender))
-    (totals (get-epoch-totals settle-epoch))
+    (current-cycle (get-current-cycle))
+    (existing (get-sbtc-deposit current-cycle tx-sender))
+    (totals (get-cycle-totals current-cycle))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount MIN_SBTC_DEPOSIT) ERR_DEPOSIT_TOO_SMALL)
 
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
       transfer amount tx-sender current-contract none))
 
     (map-set sbtc-deposits
-      { epoch: settle-epoch, depositor: tx-sender }
+      { cycle: current-cycle, depositor: tx-sender }
       (+ existing amount))
-    (map-set epoch-totals settle-epoch
+    (map-set cycle-totals current-cycle
       (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
 
     (print {
       event: "deposit-sbtc",
       depositor: tx-sender,
       amount: amount,
-      settle-epoch: settle-epoch,
+      cycle: current-cycle,
       timestamp: stacks-block-time
     })
-    (ok settle-epoch)))
+    (ok current-cycle)))
 
-;; Cancel - only during the SAME epoch you deposited
-(define-public (cancel-stx-deposit (settle-epoch uint))
+;; Cancel - only during deposit phase of the SAME cycle
+(define-public (cancel-stx-deposit (cycle uint))
   (let (
-    (current-epoch (get-current-epoch))
-    (deposit-epoch (- settle-epoch u1))
     (caller tx-sender)
-    (amount (get-stx-deposit settle-epoch caller))
-    (totals (get-epoch-totals settle-epoch))
+    (amount (get-stx-deposit cycle caller))
+    (totals (get-cycle-totals cycle))
   )
-    (asserts! (is-eq current-epoch deposit-epoch) ERR_EPOCH_LOCKED)
+    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
 
     (try! (stx-transfer? amount current-contract caller))
 
-    (map-delete stx-deposits { epoch: settle-epoch, depositor: caller })
-    (map-set epoch-totals settle-epoch
+    (map-delete stx-deposits { cycle: cycle, depositor: caller })
+    (map-set cycle-totals cycle
       (merge totals { total-stx: (- (get total-stx totals) amount) }))
 
-    (print { event: "cancel-stx", depositor: caller, amount: amount, settle-epoch: settle-epoch })
+    (print { event: "cancel-stx", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
-(define-public (cancel-sbtc-deposit (settle-epoch uint))
+(define-public (cancel-sbtc-deposit (cycle uint))
   (let (
-    (current-epoch (get-current-epoch))
-    (deposit-epoch (- settle-epoch u1))
     (caller tx-sender)
-    (amount (get-sbtc-deposit settle-epoch caller))
-    (totals (get-epoch-totals settle-epoch))
+    (amount (get-sbtc-deposit cycle caller))
+    (totals (get-cycle-totals cycle))
   )
-    (asserts! (is-eq current-epoch deposit-epoch) ERR_EPOCH_LOCKED)
+    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
 
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
       transfer amount current-contract caller none))
 
-    (map-delete sbtc-deposits { epoch: settle-epoch, depositor: caller })
-    (map-set epoch-totals settle-epoch
+    (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
+    (map-set cycle-totals cycle
       (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
 
-    (print { event: "cancel-sbtc", depositor: caller, amount: amount, settle-epoch: settle-epoch })
+    (print { event: "cancel-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
 ;; ============================================================================
-;; Public: Settlement
+;; Public: Settlement (only during settle phase)
 ;; ============================================================================
 
-;; Settle epoch N. Can only be called after epoch N+1 ends.
-;; Settle using stored Pyth prices (free, no VAA needed).
-;; Bot should try this first. If ERR_STALE_PRICE, use settle-with-refresh.
-;; Anyone can trigger - permissionless.
-(define-public (settle (epoch uint))
+;; Settle using stored Pyth prices (free). Try this first.
+(define-public (settle (cycle uint))
   (let (
-    ;; Read latest Pyth prices from storage (free read-only)
     (btc-feed (unwrap! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
       get-price BTC_USD_FEED) ERR_ZERO_PRICE))
@@ -256,34 +252,29 @@
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
       get-price STX_USD_FEED) ERR_ZERO_PRICE))
   )
-    (execute-settlement epoch btc-feed stx-feed)))
+    (execute-settlement cycle btc-feed stx-feed)))
 
-;; Settle with fresh Pyth VAAs when stored prices are stale.
-;; Costs ~2 uSTX (Pyth update fee per feed).
-;; Anyone can trigger - permissionless.
+;; Settle with fresh Pyth VAAs when stored prices are stale (~2 uSTX).
 (define-public (settle-with-refresh
-  (epoch uint)
+  (cycle uint)
   (btc-vaa (buff 8192))
   (stx-vaa (buff 8192))
   (pyth-storage <pyth-storage-trait>)
   (pyth-decoder <pyth-decoder-trait>)
   (wormhole-core <wormhole-core-trait>))
   (begin
-    ;; Refresh BTC/USD price via Pyth (~1 uSTX fee)
     (try! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
       verify-and-update-price-feeds btc-vaa
       { pyth-storage-contract: pyth-storage,
         pyth-decoder-contract: pyth-decoder,
         wormhole-core-contract: wormhole-core }))
-    ;; Refresh STX/USD price via Pyth (~1 uSTX fee)
     (try! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
       verify-and-update-price-feeds stx-vaa
       { pyth-storage-contract: pyth-storage,
         pyth-decoder-contract: pyth-decoder,
         wormhole-core-contract: wormhole-core }))
-    ;; Now read freshly updated prices and settle
     (let (
       (btc-feed (unwrap! (contract-call?
         'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
@@ -292,23 +283,21 @@
         'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
         get-price STX_USD_FEED) ERR_ZERO_PRICE))
     )
-      (execute-settlement epoch btc-feed stx-feed))))
+      (execute-settlement cycle btc-feed stx-feed))))
 
-;; Shared settlement logic - validates gates and executes pro-rata fill
+;; Shared settlement logic
 (define-private (execute-settlement
-  (epoch uint)
+  (cycle uint)
   (btc-feed { price: int, conf: uint, expo: int, ema-price: int,
               ema-conf: uint, publish-time: uint, prev-publish-time: uint })
   (stx-feed { price: int, conf: uint, expo: int, ema-price: int,
               ema-conf: uint, publish-time: uint, prev-publish-time: uint }))
   (let (
-    (price-epoch (+ epoch u1))
-    (current-epoch (get-current-epoch))
-    (totals (get-epoch-totals epoch))
+    (current-cycle (get-current-cycle))
+    (totals (get-cycle-totals cycle))
     (total-stx (get total-stx totals))
     (total-sbtc (get total-sbtc totals))
 
-    ;; Extract values (both feeds share expo -8)
     (btc-price (to-uint (get price btc-feed)))
     (stx-price (to-uint (get price stx-feed)))
     (btc-conf (get conf btc-feed))
@@ -319,10 +308,8 @@
     ;; Oracle price: STX per sBTC
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
 
-    ;; DEX price from BitFlow pool (admin-switchable source)
+    ;; DEX price for sanity check
     (dex-price (get-dex-price))
-
-    ;; Deviation: |oracle - dex|
     (price-diff (if (> oracle-price dex-price)
       (- oracle-price dex-price)
       (- dex-price oracle-price)))
@@ -332,49 +319,159 @@
     (stx-value-of-sbtc (/ (* total-sbtc oracle-price) PRICE_PRECISION))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
-    (asserts! (> current-epoch price-epoch) ERR_EPOCH_NOT_FINAL)
-    (asserts! (is-none (map-get? settlements epoch)) ERR_ALREADY_SETTLED)
+    ;; Must be in settle phase of this cycle
+    (asserts! (is-eq current-cycle cycle) ERR_NOT_SETTLE_PHASE)
+    (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
+    ;; Not already settled
+    (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
+    ;; Must have deposits
     (asserts! (or (> total-stx u0) (> total-sbtc u0)) ERR_NOTHING_TO_SETTLE)
+    ;; Valid prices
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
 
-    ;; Gate 1: Staleness - prices must be < 60s old
+    ;; Gate 1: Staleness
     (asserts! (> btc-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
     (asserts! (> stx-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
 
-    ;; Gate 2: Confidence - sources must agree within 2%
+    ;; Gate 2: Confidence < 2%
     (asserts! (< btc-conf (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     (asserts! (< stx-conf (/ stx-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
 
-    ;; Gate 3: DEX sanity - oracle vs pool within 10%
+    ;; Gate 3: DEX sanity < 10%
     (asserts! (< price-diff max-allowed-diff) ERR_PRICE_DEX_DIVERGENCE)
 
-    ;; Determine which side is binding and settle
+    ;; Execute pro-rata fill and auto-roll unfilled into next cycle
     (if (<= stx-value-of-sbtc total-stx)
-      (settle-sbtc-bound epoch oracle-price total-stx total-sbtc stx-value-of-sbtc)
-      (settle-stx-bound epoch oracle-price total-stx total-sbtc))))
+      (settle-sbtc-bound cycle oracle-price total-stx total-sbtc stx-value-of-sbtc)
+      (settle-stx-bound cycle oracle-price total-stx total-sbtc))))
 
-;; Read DEX price based on admin-configured source
+;; sBTC side is binding - all sBTC fills, STX partial
+(define-private (settle-sbtc-bound
+  (cycle uint) (price uint)
+  (total-stx uint) (total-sbtc uint)
+  (stx-clearing uint))
+  (let (
+    (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
+    (sbtc-clearing total-sbtc)
+    (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
+    (stx-unfilled (- total-stx stx-clearing))
+    (next-cycle (+ cycle u1))
+    (next-totals (get-cycle-totals next-cycle))
+  )
+    ;; Record settlement
+    (map-set settlements cycle
+      { price: price,
+        stx-cleared: stx-clearing,
+        sbtc-cleared: sbtc-clearing,
+        stx-fee: stx-fee,
+        sbtc-fee: sbtc-fee,
+        settled-at: stacks-block-time })
+
+    ;; Fees to treasury
+    (if (> stx-fee u0)
+      (try! (stx-transfer? stx-fee current-contract (var-get treasury)))
+      true)
+    (if (> sbtc-fee u0)
+      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+        transfer sbtc-fee current-contract (var-get treasury) none))
+      true)
+
+    ;; Auto-roll unfilled STX into next cycle
+    (if (> stx-unfilled u0)
+      (map-set cycle-totals next-cycle
+        (merge next-totals { total-stx: (+ (get total-stx next-totals) stx-unfilled) }))
+      true)
+
+    (print {
+      event: "settlement",
+      cycle: cycle,
+      price: price,
+      stx-cleared: stx-clearing,
+      sbtc-cleared: sbtc-clearing,
+      stx-unfilled: stx-unfilled,
+      sbtc-unfilled: u0,
+      stx-fee: stx-fee,
+      sbtc-fee: sbtc-fee,
+      stx-rolled-to: next-cycle,
+      binding-side: "sbtc"
+    })
+    (ok { price: price, stx-cleared: stx-clearing, sbtc-cleared: sbtc-clearing,
+          stx-fee: stx-fee, sbtc-fee: sbtc-fee })))
+
+;; STX side is binding - all STX fills, sBTC partial
+(define-private (settle-stx-bound
+  (cycle uint) (price uint)
+  (total-stx uint) (total-sbtc uint))
+  (let (
+    (stx-clearing total-stx)
+    (sbtc-clearing (/ (* total-stx PRICE_PRECISION) price))
+    (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
+    (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
+    (sbtc-unfilled (- total-sbtc sbtc-clearing))
+    (next-cycle (+ cycle u1))
+    (next-totals (get-cycle-totals next-cycle))
+  )
+    (map-set settlements cycle
+      { price: price,
+        stx-cleared: stx-clearing,
+        sbtc-cleared: sbtc-clearing,
+        stx-fee: stx-fee,
+        sbtc-fee: sbtc-fee,
+        settled-at: stacks-block-time })
+
+    (if (> stx-fee u0)
+      (try! (stx-transfer? stx-fee current-contract (var-get treasury)))
+      true)
+    (if (> sbtc-fee u0)
+      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+        transfer sbtc-fee current-contract (var-get treasury) none))
+      true)
+
+    ;; Auto-roll unfilled sBTC into next cycle
+    (if (> sbtc-unfilled u0)
+      (map-set cycle-totals next-cycle
+        (merge next-totals { total-sbtc: (+ (get total-sbtc next-totals) sbtc-unfilled) }))
+      true)
+
+    (print {
+      event: "settlement",
+      cycle: cycle,
+      price: price,
+      stx-cleared: stx-clearing,
+      sbtc-cleared: sbtc-clearing,
+      stx-unfilled: u0,
+      sbtc-unfilled: sbtc-unfilled,
+      stx-fee: stx-fee,
+      sbtc-fee: sbtc-fee,
+      sbtc-rolled-to: next-cycle,
+      binding-side: "stx"
+    })
+    (ok { price: price, stx-cleared: stx-clearing, sbtc-cleared: sbtc-clearing,
+          stx-fee: stx-fee, sbtc-fee: sbtc-fee })))
+
+;; ============================================================================
+;; Read-only: DEX price
+;; ============================================================================
+
 (define-read-only (get-dex-price)
   (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
     (get-xyk-price)
     (get-dlmm-price)))
 
-;; BitFlow XYK pool: price = stx-reserve / sbtc-reserve
+;; BitFlow XYK: price = stx-reserve / sbtc-reserve
 (define-read-only (get-xyk-price)
   (let (
     (pool (unwrap-panic (contract-call?
       'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
       get-pool)))
-    ;; x = sBTC (8 decimals), y = STX (6 decimals)
-    ;; price = y-balance * 10^2 * PRICE_PRECISION / x-balance
-    ;; (10^2 adjusts for 8-6=2 decimal difference)
+    ;; x = sBTC (8 dec), y = STX (6 dec), adjust by 10^2
     (x-bal (get x-balance pool))
     (y-bal (get y-balance pool))
   )
     (/ (* y-bal u100 PRICE_PRECISION) x-bal)))
 
-;; BitFlow DLMM pool: read active bin price from core
+;; BitFlow DLMM: active bin price
 (define-read-only (get-dlmm-price)
   (let (
     (pool (unwrap-panic (contract-call?
@@ -387,141 +484,68 @@
       'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
       get-bin-price initial-price bin-step active-bin-id)))
   )
-    ;; bin-price is in PRICE_SCALE_BPS (10^8), same as our PRICE_PRECISION
     bin-price))
-
-;; sBTC bucket is smaller - all sBTC depositors fully filled
-(define-private (settle-sbtc-bound
-  (epoch uint) (price uint)
-  (total-stx uint) (total-sbtc uint)
-  (stx-clearing uint))
-  (let (
-    (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
-    (sbtc-clearing total-sbtc)
-    (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
-    (stx-unfilled (- total-stx stx-clearing))
-  )
-    (map-set settlements epoch
-      { price: price,
-        stx-cleared: stx-clearing,
-        sbtc-cleared: sbtc-clearing,
-        stx-fee: stx-fee,
-        sbtc-fee: sbtc-fee,
-        settled-at: stacks-block-time })
-
-    (if (> stx-fee u0)
-      (try! (stx-transfer? stx-fee current-contract (var-get treasury)))
-      true)
-    (if (> sbtc-fee u0)
-      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer sbtc-fee current-contract (var-get treasury) none))
-      true)
-
-    (print {
-      event: "settlement",
-      epoch: epoch,
-      price: price,
-      stx-cleared: stx-clearing,
-      sbtc-cleared: sbtc-clearing,
-      stx-unfilled: stx-unfilled,
-      sbtc-unfilled: u0,
-      stx-fee: stx-fee,
-      sbtc-fee: sbtc-fee,
-      binding-side: "sbtc"
-    })
-    (ok { price: price, stx-cleared: stx-clearing, sbtc-cleared: sbtc-clearing,
-          stx-fee: stx-fee, sbtc-fee: sbtc-fee })))
-
-;; STX bucket is smaller - all STX depositors fully filled
-(define-private (settle-stx-bound
-  (epoch uint) (price uint)
-  (total-stx uint) (total-sbtc uint))
-  (let (
-    (stx-clearing total-stx)
-    (sbtc-clearing (/ (* total-stx PRICE_PRECISION) price))
-    (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
-    (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
-    (sbtc-unfilled (- total-sbtc sbtc-clearing))
-  )
-    (map-set settlements epoch
-      { price: price,
-        stx-cleared: stx-clearing,
-        sbtc-cleared: sbtc-clearing,
-        stx-fee: stx-fee,
-        sbtc-fee: sbtc-fee,
-        settled-at: stacks-block-time })
-
-    (if (> stx-fee u0)
-      (try! (stx-transfer? stx-fee current-contract (var-get treasury)))
-      true)
-    (if (> sbtc-fee u0)
-      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer sbtc-fee current-contract (var-get treasury) none))
-      true)
-
-    (print {
-      event: "settlement",
-      epoch: epoch,
-      price: price,
-      stx-cleared: stx-clearing,
-      sbtc-cleared: sbtc-clearing,
-      stx-unfilled: u0,
-      sbtc-unfilled: sbtc-unfilled,
-      stx-fee: stx-fee,
-      sbtc-fee: sbtc-fee,
-      binding-side: "stx"
-    })
-    (ok { price: price, stx-cleared: stx-clearing, sbtc-cleared: sbtc-clearing,
-          stx-fee: stx-fee, sbtc-fee: sbtc-fee })))
 
 ;; ============================================================================
 ;; Public: Claims
 ;; ============================================================================
 
-;; STX depositors claim sBTC. Unfilled STX returned.
-(define-public (claim-as-stx-depositor (epoch uint))
+;; STX depositors claim sBTC. Unfilled STX was auto-rolled.
+(define-public (claim-as-stx-depositor (cycle uint))
   (let (
-    (settlement (unwrap! (map-get? settlements epoch) ERR_EPOCH_NOT_FINAL))
+    (settlement (unwrap! (map-get? settlements cycle) ERR_NOTHING_TO_CLAIM))
     (caller tx-sender)
-    (my-deposit (get-stx-deposit epoch caller))
-    (totals (get-epoch-totals epoch))
+    (my-deposit (get-stx-deposit cycle caller))
+    (totals (get-cycle-totals cycle))
     (total-stx (get total-stx totals))
     (stx-cleared (get stx-cleared settlement))
     (sbtc-cleared (get sbtc-cleared settlement))
     (sbtc-fee (get sbtc-fee settlement))
+    ;; My pro-rata share
     (my-stx-filled (/ (* my-deposit stx-cleared) total-stx))
     (sbtc-after-fee (- sbtc-cleared sbtc-fee))
     (my-sbtc-received (/ (* my-stx-filled sbtc-after-fee) stx-cleared))
+    ;; Unfilled portion was auto-rolled into next cycle's totals.
+    ;; Track user's rolled amount for next cycle.
     (my-stx-unfilled (- my-deposit my-stx-filled))
+    (next-cycle (+ cycle u1))
+    (existing-next (get-stx-deposit next-cycle caller))
   )
     (asserts! (> my-deposit u0) ERR_NOTHING_TO_CLAIM)
 
-    (map-delete stx-deposits { epoch: epoch, depositor: caller })
+    ;; Clear this cycle's deposit
+    (map-delete stx-deposits { cycle: cycle, depositor: caller })
 
+    ;; Credit unfilled to next cycle's individual deposit
+    (if (> my-stx-unfilled u0)
+      (map-set stx-deposits
+        { cycle: next-cycle, depositor: caller }
+        (+ existing-next my-stx-unfilled))
+      true)
+
+    ;; Transfer sBTC to depositor
     (if (> my-sbtc-received u0)
       (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
         transfer my-sbtc-received current-contract caller none))
-      true)
-    (if (> my-stx-unfilled u0)
-      (try! (stx-transfer? my-stx-unfilled current-contract caller))
       true)
 
     (print {
       event: "claim-stx-depositor",
       depositor: caller,
-      epoch: epoch,
+      cycle: cycle,
       sbtc-received: my-sbtc-received,
-      stx-refunded: my-stx-unfilled
+      stx-rolled: my-stx-unfilled,
+      rolled-to-cycle: next-cycle
     })
-    (ok { sbtc-received: my-sbtc-received, stx-refunded: my-stx-unfilled })))
+    (ok { sbtc-received: my-sbtc-received, stx-rolled: my-stx-unfilled })))
 
-;; sBTC depositors claim STX. Unfilled sBTC returned.
-(define-public (claim-as-sbtc-depositor (epoch uint))
+;; sBTC depositors claim STX. Unfilled sBTC was auto-rolled.
+(define-public (claim-as-sbtc-depositor (cycle uint))
   (let (
-    (settlement (unwrap! (map-get? settlements epoch) ERR_EPOCH_NOT_FINAL))
+    (settlement (unwrap! (map-get? settlements cycle) ERR_NOTHING_TO_CLAIM))
     (caller tx-sender)
-    (my-deposit (get-sbtc-deposit epoch caller))
-    (totals (get-epoch-totals epoch))
+    (my-deposit (get-sbtc-deposit cycle caller))
+    (totals (get-cycle-totals cycle))
     (total-sbtc (get total-sbtc totals))
     (stx-cleared (get stx-cleared settlement))
     (sbtc-cleared (get sbtc-cleared settlement))
@@ -530,27 +554,74 @@
     (stx-after-fee (- stx-cleared stx-fee))
     (my-stx-received (/ (* my-sbtc-filled stx-after-fee) sbtc-cleared))
     (my-sbtc-unfilled (- my-deposit my-sbtc-filled))
+    (next-cycle (+ cycle u1))
+    (existing-next (get-sbtc-deposit next-cycle caller))
   )
     (asserts! (> my-deposit u0) ERR_NOTHING_TO_CLAIM)
 
-    (map-delete sbtc-deposits { epoch: epoch, depositor: caller })
+    (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
+
+    ;; Credit unfilled to next cycle
+    (if (> my-sbtc-unfilled u0)
+      (map-set sbtc-deposits
+        { cycle: next-cycle, depositor: caller }
+        (+ existing-next my-sbtc-unfilled))
+      true)
 
     (if (> my-stx-received u0)
       (try! (stx-transfer? my-stx-received current-contract caller))
-      true)
-    (if (> my-sbtc-unfilled u0)
-      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer my-sbtc-unfilled current-contract caller none))
       true)
 
     (print {
       event: "claim-sbtc-depositor",
       depositor: caller,
-      epoch: epoch,
+      cycle: cycle,
       stx-received: my-stx-received,
-      sbtc-refunded: my-sbtc-unfilled
+      sbtc-rolled: my-sbtc-unfilled,
+      rolled-to-cycle: next-cycle
     })
-    (ok { stx-received: my-stx-received, sbtc-refunded: my-sbtc-unfilled })))
+    (ok { stx-received: my-stx-received, sbtc-rolled: my-sbtc-unfilled })))
+
+;; Withdraw rolled funds - cancel your auto-rolled position from a previous cycle
+;; Must be during deposit phase of the cycle the funds rolled into
+(define-public (withdraw-rolled-stx (cycle uint))
+  (let (
+    (caller tx-sender)
+    (amount (get-stx-deposit cycle caller))
+    (totals (get-cycle-totals cycle))
+  )
+    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
+
+    (try! (stx-transfer? amount current-contract caller))
+
+    (map-delete stx-deposits { cycle: cycle, depositor: caller })
+    (map-set cycle-totals cycle
+      (merge totals { total-stx: (- (get total-stx totals) amount) }))
+
+    (print { event: "withdraw-rolled-stx", depositor: caller, amount: amount, cycle: cycle })
+    (ok amount)))
+
+(define-public (withdraw-rolled-sbtc (cycle uint))
+  (let (
+    (caller tx-sender)
+    (amount (get-sbtc-deposit cycle caller))
+    (totals (get-cycle-totals cycle))
+  )
+    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
+
+    (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+      transfer amount current-contract caller none))
+
+    (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
+    (map-set cycle-totals cycle
+      (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
+
+    (print { event: "withdraw-rolled-sbtc", depositor: caller, amount: amount, cycle: cycle })
+    (ok amount)))
 
 ;; ============================================================================
 ;; Admin
@@ -571,9 +642,6 @@
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
     (ok (var-set contract-owner new-owner))))
 
-;; Switch DEX source for sanity check
-;; u1 = XYK pool (default, deeper liquidity)
-;; u2 = DLMM pool (concentrated, tighter spread)
 (define-public (set-dex-source (source uint))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
