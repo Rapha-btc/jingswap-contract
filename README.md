@@ -20,8 +20,6 @@ DEPOSIT (open-ended, min 150 blocks / ~5 min)
   |
   someone calls close-deposits()     <-- only after 150 blocks
   |
-BUFFER (30 blocks / ~1 min)
-  |
 SETTLE (open-ended until success)
   |
   settle() succeeds --> next cycle starts, deposit phase open
@@ -32,10 +30,9 @@ SETTLE (open-ended until success)
 ```
 
 1. **Deposit** — Lock sBTC or STX. Stays open until someone calls `close-deposits()` (min 150 blocks). More time = more liquidity. 50 slots per side — when full, larger deposits bump the smallest (bumped depositor is refunded instantly).
-2. **Close deposits** — Anyone can call after 150 blocks. Transitions to buffer phase. No more deposits accepted.
-3. **Buffer** — 30 blocks. No actions. Ensures Pyth prices are fresh by settle time.
-4. **Settle** — Anyone calls `settle()`. Reads Pyth spot price, validates 3 safety gates, computes pro-rata fills, sends tokens directly to all depositors. Unfilled auto-rolls to next cycle.
-5. **Cancel** — If settlement keeps failing (500+ blocks from cycle start), anyone can cancel. All deposits roll to next cycle. Users can individually withdraw during the next deposit phase.
+2. **Close deposits** — Anyone can call after 150 blocks. Transitions directly to settle phase. No more deposits accepted.
+3. **Settle** — Anyone calls `settle()`. Reads Pyth spot price, validates 3 safety gates, computes pro-rata fills, sends tokens directly to all depositors. Unfilled auto-rolls to next cycle.
+4. **Cancel** — If settlement keeps failing (500+ blocks from cycle start), anyone can cancel. All deposits roll to next cycle. Users can individually withdraw during the next deposit phase.
 
 ### Anti-Gaming Properties
 
@@ -46,6 +43,16 @@ SETTLE (open-ended until success)
 | Oracle manipulation | Pyth confidence check + DEX sanity check |
 | Stale prices | Pyth publish-time < 60s old |
 | Dust spam | Admin-adjustable minimum deposits + priority queue bumping |
+
+### Fair Information Symmetry
+
+There is no buffer between deposit close and settlement. Depositors can see the current Pyth price at any point during the deposit phase. This is not an exploit — it's a feature:
+
+- **Early depositors** can cancel anytime during the deposit phase if the price moves against them
+- **Late depositors** have more price certainty but get the same settlement price as everyone else
+- **No one gets a better price** — everyone settles at the same uniform oracle price
+
+The "blind" protection is not about hiding the price. It's that no one can sandwich, front-run, or get a different price through transaction ordering. The price is oracle-set, uniform for all, and MEV-free.
 
 ### Three Safety Gates
 
@@ -66,8 +73,6 @@ Every phase transition is explicit — someone must call a function. No automati
 ```
 deposit phase (open-ended)
   --> close-deposits()        anyone, after 150 blocks
-buffer (30 blocks)
-  --> (automatic)
 settle phase (open-ended)
   --> settle() succeeds       anyone, advance cycle, deposit phase starts
   --> cancel-cycle()          anyone after 500 blocks, roll deposits, advance cycle
@@ -144,7 +149,6 @@ Admin-switchable between two BitFlow pools:
 | Parameter | Value | Adjustable |
 |-----------|-------|-----------|
 | Min deposit window | 150 blocks (~5 min) | No |
-| Buffer after close | 30 blocks (~1 min) | No |
 | Cancel threshold | 500 blocks (~16 min) | No |
 | Fee | 10 bps (0.10%) per side | No |
 | Max depositors per side | 50 | No |
@@ -161,6 +165,37 @@ Admin-switchable between two BitFlow pools:
 - **Treasuries** (Zest, BitFlow, ALEX) rebalancing between sBTC and STX
 - **Yield protocols** converting accumulated sBTC fees to STX for operations
 - **Anyone** who wants fair, predictable pricing without MEV risk
+
+## Premium: Automated Swap Strategies
+
+**A dedicated contract instance deployable by whales who want hands-off execution.**
+
+The blind auction is a public shared pool. But for serious players — treasuries, funds, large holders — we offer a premium tier: a private contract deployed on their behalf, paired with an off-chain keeper that executes a custom swap strategy over time.
+
+### How It Works
+
+1. Whale defines their strategy off-chain: direction (sBTC to STX or vice versa), total amount, timeframe (1 day, 1 week, 1 month+), and optional conditions (e.g. only below a target price).
+2. A dedicated contract is deployed — only the whale's address can withdraw. The keeper can only swap (sBTC to STX or STX to sBTC), never withdraw to itself.
+3. The keeper participates in blind auction cycles on the whale's behalf, dripping the position across many cycles according to the strategy parameters.
+4. The whale withdraws their accumulated swapped tokens at any time.
+
+### What's On-Chain vs Off-Chain
+
+| On-chain | Off-chain |
+|----------|-----------|
+| Deposits into blind auction cycles | Strategy parameters (timeframe, conditions) |
+| Swaps at oracle price (same safety gates) | Target price triggers |
+| Withdrawal to whale's address only | Drip scheduling and cycle participation |
+| Keeper can only swap, never withdraw | Monitoring and retry logic |
+
+### Why Premium
+
+- **Set and forget** — define your strategy once, the keeper executes over days/weeks
+- **No market impact** — small drips across many cycles, each at oracle price
+- **Trustless custody** — the contract enforces that only the whale can withdraw
+- **Off-chain flexibility** — strategy logic (timing, price conditions, amounts per cycle) lives off-chain and can be adjusted without redeploying
+
+This is the on-chain equivalent of a CEX TWAP algo order, but self-custodied and MEV-free.
 
 ## Development
 
