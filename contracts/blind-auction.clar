@@ -20,10 +20,10 @@
 ;; ============================================================================
 
 ;; Cycle timing (in Stacks blocks, ~5-10s each)
-;; ~80 blocks = ~8 minutes at ~6s/block
-(define-constant CYCLE_LENGTH u80)
-(define-constant DEPOSIT_END u50)      ;; blocks 0-50: deposit window (~5 min)
-(define-constant SETTLE_START u60)     ;; blocks 60-80: settle window (~2 min, 10 block buffer)
+;; ~240 blocks = ~8 minutes at ~2s/block
+(define-constant CYCLE_LENGTH u240)
+(define-constant DEPOSIT_END u150)     ;; blocks 0-150: deposit window (~5 min)
+(define-constant SETTLE_START u180)    ;; blocks 180-240: settle window (~2 min, 30 block buffer)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
@@ -619,9 +619,9 @@
     (total-stx (var-get settle-total-stx))
     (stx-cleared (var-get settle-stx-cleared))
     (sbtc-after-fee (var-get settle-sbtc-after-fee))
-    (my-stx-filled (if (> total-stx u0) (/ (* my-deposit stx-cleared) total-stx) u0))
-    (my-sbtc-received (if (> stx-cleared u0) (/ (* my-stx-filled sbtc-after-fee) stx-cleared) u0))
-    (my-stx-unfilled (- my-deposit my-stx-filled))
+    ;; Direct single-division: avoids compounded rounding loss
+    (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit sbtc-after-fee) total-stx) u0))
+    (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx stx-cleared)) total-stx) u0))
     (next-cycle (+ cycle u1))
     (existing-next (get-stx-deposit next-cycle depositor))
   )
@@ -670,9 +670,9 @@
     (total-sbtc (var-get settle-total-sbtc))
     (sbtc-cleared (var-get settle-sbtc-cleared))
     (stx-after-fee (var-get settle-stx-after-fee))
-    (my-sbtc-filled (if (> total-sbtc u0) (/ (* my-deposit sbtc-cleared) total-sbtc) u0))
-    (my-stx-received (if (> sbtc-cleared u0) (/ (* my-sbtc-filled stx-after-fee) sbtc-cleared) u0))
-    (my-sbtc-unfilled (- my-deposit my-sbtc-filled))
+    ;; Direct single-division: avoids compounded rounding loss
+    (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit stx-after-fee) total-sbtc) u0))
+    (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc sbtc-cleared)) total-sbtc) u0))
     (next-cycle (+ cycle u1))
     (existing-next (get-sbtc-deposit next-cycle depositor))
   )
