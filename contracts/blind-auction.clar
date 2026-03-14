@@ -105,7 +105,8 @@
 (define-data-var settle-stx-after-fee uint u0)
 
 ;; Helper for filter
-(define-data-var bumped-principal principal tx-sender)
+(define-data-var bumped-stx-principal principal tx-sender)
+(define-data-var bumped-sbtc-principal principal tx-sender)
 
 ;; ============================================================================
 ;; Data maps
@@ -220,8 +221,11 @@
       (merge acc { smallest: amount, smallest-principal: depositor })
       acc)))
 
-(define-private (not-eq-bumped (entry principal))
-  (not (is-eq entry (var-get bumped-principal))))
+(define-private (not-eq-bumped-stx (entry principal))
+  (not (is-eq entry (var-get bumped-stx-principal))))
+
+(define-private (not-eq-bumped-sbtc (entry principal))
+  (not (is-eq entry (var-get bumped-sbtc-principal))))
 
 ;; ============================================================================
 ;; Private: Roll helpers (for cancel-cycle)
@@ -273,9 +277,9 @@
         (as-contract? ((with-stx smallest-amount))
           (try! (stx-transfer? smallest-amount current-contract smallest-who)))
         (try! (stx-transfer? amount tx-sender current-contract))
-        (var-set bumped-principal smallest-who)
+        (var-set bumped-stx-principal smallest-who)
         (map-set stx-depositor-list cycle
-          (unwrap-panic (as-max-len? (append (filter not-eq-bumped depositors) tx-sender) u50)))
+          (unwrap-panic (as-max-len? (append (filter not-eq-bumped-stx depositors) tx-sender) u50)))
         (map-delete stx-deposits { cycle: cycle, depositor: smallest-who })
         (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
         (map-set cycle-totals cycle
@@ -317,14 +321,14 @@
         (smallest-who (get smallest-principal smallest-info))
       )
         (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-        (as-contract? ((with-sbtc smallest-amount))
+        (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" smallest-amount))
           (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
             transfer smallest-amount current-contract smallest-who none)))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer amount tx-sender current-contract none))
-        (var-set bumped-principal smallest-who)
+        (var-set bumped-sbtc-principal smallest-who)
         (map-set sbtc-depositor-list cycle
-          (unwrap-panic (as-max-len? (append (filter not-eq-bumped depositors) tx-sender) u50)))
+          (unwrap-panic (as-max-len? (append (filter not-eq-bumped-sbtc depositors) tx-sender) u50)))
         (map-delete sbtc-deposits { cycle: cycle, depositor: smallest-who })
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
         (map-set cycle-totals cycle
@@ -360,8 +364,8 @@
 
     (try! (stx-transfer? amount current-contract caller))
     (map-delete stx-deposits { cycle: cycle, depositor: caller })
-    (var-set bumped-principal caller)
-    (map-set stx-depositor-list cycle (filter not-eq-bumped (get-stx-depositors cycle)))
+    (var-set bumped-stx-principal caller)
+    (map-set stx-depositor-list cycle (filter not-eq-bumped-stx (get-stx-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-stx: (- (get total-stx totals) amount) }))
 
@@ -381,8 +385,8 @@
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
       transfer amount current-contract caller none))
     (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
-    (var-set bumped-principal caller)
-    (map-set sbtc-depositor-list cycle (filter not-eq-bumped (get-sbtc-depositors cycle)))
+    (var-set bumped-sbtc-principal caller)
+    (map-set sbtc-depositor-list cycle (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
 
