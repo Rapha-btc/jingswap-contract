@@ -96,7 +96,7 @@
 (define-data-var deposits-closed-block uint u0)
 
 ;; Settlement context (set during execute-settlement, read by distribute)
-(define-data-var settle-cycle uint u0)
+
 (define-data-var settle-stx-cleared uint u0)
 (define-data-var settle-sbtc-cleared uint u0)
 (define-data-var settle-total-stx uint u0)
@@ -233,13 +233,13 @@
 
 ;; Move a depositor's STX deposit from cancelled cycle to next cycle
 (define-private (roll-stx-depositor (depositor principal))
-  (let ((cycle (var-get settle-cycle)))
+  (let ((cycle (var-get current-cycle)))
     (map-set stx-deposits { cycle: (+ cycle u1), depositor: depositor }
       (get-stx-deposit cycle depositor))
     (map-delete stx-deposits { cycle: cycle, depositor: depositor })))
 
 (define-private (roll-sbtc-depositor (depositor principal))
-  (let ((cycle (var-get settle-cycle)))
+  (let ((cycle (var-get current-cycle)))
     (map-set sbtc-deposits { cycle: (+ cycle u1), depositor: depositor }
       (get-sbtc-deposit cycle depositor))
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })))
@@ -248,7 +248,9 @@
 (define-private (roll-depositor-lists (cycle uint))
   (begin
     (map-set stx-depositor-list (+ cycle u1) (get-stx-depositors cycle))
-    (map-set sbtc-depositor-list (+ cycle u1) (get-sbtc-depositors cycle))))
+    (map-set sbtc-depositor-list (+ cycle u1) (get-sbtc-depositors cycle))
+    (map-delete stx-depositor-list cycle)
+    (map-delete sbtc-depositor-list cycle)))
 
 ;; ============================================================================
 ;; Public: Deposits (only during deposit phase)
@@ -471,35 +473,22 @@
     (cycle (var-get current-cycle))
     (closed-block (var-get deposits-closed-block))
     (totals (get-cycle-totals cycle))
-    (next-cycle (+ cycle u1))
-    (next-totals (get-cycle-totals next-cycle))
   )
     (asserts! (> closed-block u0) ERR_NOT_SETTLE_PHASE)
     (asserts! (>= stacks-block-height
                   (+ closed-block BUFFER_BLOCKS CANCEL_THRESHOLD))
               ERR_CANCEL_TOO_EARLY)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-
-    ;; Roll totals to next cycle
-    (map-set cycle-totals next-cycle
-      { total-stx: (+ (get total-stx next-totals) (get total-stx totals)),
-        total-sbtc: (+ (get total-sbtc next-totals) (get total-sbtc totals)) })
-
-    ;; Roll individual deposits to next cycle
-    (var-set settle-cycle cycle)
+    (map-set cycle-totals (+ cycle u1) totals)
+    (map-delete cycle-totals cycle)
     (map roll-stx-depositor (get-stx-depositors cycle))
     (map roll-sbtc-depositor (get-sbtc-depositors cycle))
-
-    ;; Roll depositor lists to next cycle
     (roll-depositor-lists cycle)
-
-    ;; Advance to next cycle (deposit phase starts)
     (advance-cycle)
-
-    (print { event: "cancel-cycle", cycle: cycle, next-cycle: next-cycle,
+    (print { event: "cancel-cycle", cycle: cycle,
              stx-rolled: (get total-stx totals),
              sbtc-rolled: (get total-sbtc totals) })
-    (ok next-cycle)))
+    (ok true)))
 
 ;; ============================================================================
 ;; Private: Settlement logic
@@ -531,8 +520,6 @@
     (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
     (stx-unfilled (- total-stx stx-clearing))
     (sbtc-unfilled (- total-sbtc sbtc-clearing))
-    (next-cycle (+ cycle u1))
-    (next-totals (get-cycle-totals next-cycle))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
@@ -571,17 +558,11 @@
       true)
 
     ;; Auto-roll unfilled totals into next cycle
-    (if (> stx-unfilled u0)
-      (map-set cycle-totals next-cycle
-        (merge next-totals { total-stx: (+ (get total-stx next-totals) stx-unfilled) }))
-      true)
-    (if (> sbtc-unfilled u0)
-      (map-set cycle-totals next-cycle
-        (merge next-totals { total-sbtc: (+ (get total-sbtc next-totals) sbtc-unfilled) }))
-      true)
+    (map-set cycle-totals (+ cycle u1)
+      { total-stx: stx-unfilled, total-sbtc: sbtc-unfilled })
 
     ;; Set context for distribute functions
-    (var-set settle-cycle cycle)
+
     (var-set settle-stx-cleared stx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
     (var-set settle-total-stx total-stx)
@@ -610,7 +591,7 @@
 ;; Send sBTC to STX depositor, roll unfilled STX to next cycle
 (define-private (distribute-to-stx-depositor (depositor principal))
   (let (
-    (cycle (var-get settle-cycle))
+    (cycle (var-get current-cycle))
     (my-deposit (get-stx-deposit cycle depositor))
     (total-stx (var-get settle-total-stx))
     (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit (var-get settle-sbtc-after-fee)) total-stx) u0))
@@ -651,7 +632,7 @@
 ;; Send STX to sBTC depositor, roll unfilled sBTC to next cycle
 (define-private (distribute-to-sbtc-depositor (depositor principal))
   (let (
-    (cycle (var-get settle-cycle))
+    (cycle (var-get current-cycle))
     (my-deposit (get-sbtc-deposit cycle depositor))
     (total-sbtc (var-get settle-total-sbtc))
     (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit (var-get settle-stx-after-fee)) total-sbtc) u0))
