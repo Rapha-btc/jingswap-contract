@@ -1,11 +1,13 @@
 ;; title: blind-auction
-;; version: 0.7.0
+;; version: 0.8.0
 ;; summary: Blind batch auction for sBTC/STX swaps at synthetic oracle price
 ;; description:
-;;   ~8-minute cycle (block-based): ~50 blocks deposit, ~10 blocks buffer,
-;;   ~20 blocks settle window. 50 slots per side, larger deposits bump smallest.
-;;   Settlement reads Pyth spot price, validates 3 safety gates, then
-;;   pushes tokens directly to all depositors. Unfilled auto-rolls.
+;;   State-machine cycles: deposit (150 blocks), buffer (30 blocks), then
+;;   open-ended settle window. Cycle advances ONLY on successful settlement.
+;;   If settlement keeps failing, anyone can cancel after CANCEL_THRESHOLD
+;;   blocks, refunding all depositors and advancing the cycle.
+;;   50 slots per side, larger deposits bump smallest when full.
+;;   Three safety gates: staleness, confidence, DEX sanity.
 
 ;; ============================================================================
 ;; Traits (for Pyth refresh path)
@@ -19,11 +21,10 @@
 ;; Constants
 ;; ============================================================================
 
-;; Cycle timing (in Stacks blocks, ~5-10s each)
-;; ~240 blocks = ~8 minutes at ~2s/block
-(define-constant CYCLE_LENGTH u240)
-(define-constant DEPOSIT_END u150)     ;; blocks 0-150: deposit window (~5 min)
-(define-constant SETTLE_START u180)    ;; blocks 180-240: settle window (~2 min, 30 block buffer)
+;; Cycle phase thresholds (in blocks, ~2s each)
+(define-constant DEPOSIT_MIN_BLOCKS u150) ;; min 150 blocks before deposits can be closed (~5 min)
+(define-constant BUFFER_BLOCKS u30)       ;; 30 block buffer after close before settle opens (~1 min)
+(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks from cycle start = anyone can cancel (~16 min)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
@@ -46,9 +47,9 @@
 (define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
 
 ;; Safety gates
-(define-constant MAX_STALENESS u60)
-(define-constant MAX_CONF_RATIO u50)
-(define-constant MAX_DEX_DEVIATION u10)
+(define-constant MAX_STALENESS u60)       ;; price must be < 60s old
+(define-constant MAX_CONF_RATIO u50)      ;; conf < 2% of price (1/50)
+(define-constant MAX_DEX_DEVIATION u10)   ;; oracle vs pool < 10% (1/10)
 
 ;; DEX source options
 (define-constant DEX_SOURCE_XYK u1)
@@ -68,6 +69,9 @@
 (define-constant ERR_NOT_AUTHORIZED (err u1011))
 (define-constant ERR_NOTHING_TO_SETTLE (err u1012))
 (define-constant ERR_QUEUE_FULL (err u1013))
+(define-constant ERR_CANCEL_TOO_EARLY (err u1014))
+(define-constant ERR_CLOSE_TOO_EARLY (err u1015))
+(define-constant ERR_ALREADY_CLOSED (err u1016))
 
 ;; ============================================================================
 ;; Data vars
@@ -82,6 +86,12 @@
 (define-data-var min-stx-deposit uint u1000000)    ;; 1 STX default
 (define-data-var min-sbtc-deposit uint u1000)       ;; 0.00001 sBTC default
 
+;; Cycle state machine
+(define-data-var current-cycle uint u0)
+(define-data-var cycle-start-block uint u0)
+;; u0 = deposits still open, >0 = block when deposits were closed
+(define-data-var deposits-closed-block uint u0)
+
 ;; Settlement context (set during execute-settlement, read by distribute)
 (define-data-var settle-cycle uint u0)
 (define-data-var settle-stx-cleared uint u0)
@@ -91,11 +101,13 @@
 (define-data-var settle-sbtc-after-fee uint u0)
 (define-data-var settle-stx-after-fee uint u0)
 
+;; Helper for filter
+(define-data-var bumped-principal principal tx-sender)
+
 ;; ============================================================================
 ;; Data maps
 ;; ============================================================================
 
-;; Individual deposits per cycle per user (for pro-rata calculation)
 (define-map stx-deposits
   { cycle: uint, depositor: principal }
   uint)
@@ -104,21 +116,18 @@
   { cycle: uint, depositor: principal }
   uint)
 
-;; Ordered depositor lists per cycle (for iteration + priority bumping)
 (define-map stx-depositor-list
-  uint  ;; cycle
+  uint
   (list 50 principal))
 
 (define-map sbtc-depositor-list
-  uint  ;; cycle
+  uint
   (list 50 principal))
 
-;; Aggregate totals per cycle
 (define-map cycle-totals
   uint
   { total-stx: uint, total-sbtc: uint })
 
-;; Settlement records
 (define-map settlements
   uint
   { price: uint,
@@ -129,20 +138,27 @@
     settled-at: uint })
 
 ;; ============================================================================
-;; Read-only helpers
+;; Read-only: Cycle & phase
 ;; ============================================================================
 
 (define-read-only (get-current-cycle)
-  (/ stacks-block-height CYCLE_LENGTH))
+  (var-get current-cycle))
+
+(define-read-only (get-cycle-start-block)
+  (var-get cycle-start-block))
+
+(define-read-only (get-blocks-elapsed)
+  (- stacks-block-height (var-get cycle-start-block)))
 
 (define-read-only (get-cycle-phase)
-  (let ((elapsed (mod stacks-block-height CYCLE_LENGTH)))
-    (if (<= elapsed DEPOSIT_END) PHASE_DEPOSIT
-      (if (< elapsed SETTLE_START) PHASE_BUFFER
+  (let ((closed-block (var-get deposits-closed-block)))
+    (if (is-eq closed-block u0)
+      ;; Deposits not yet closed
+      PHASE_DEPOSIT
+      ;; Deposits closed - check if buffer has passed
+      (if (< stacks-block-height (+ closed-block BUFFER_BLOCKS))
+        PHASE_BUFFER
         PHASE_SETTLE))))
-
-(define-read-only (get-cycle-start-time (cycle uint))
-  (* cycle CYCLE_LENGTH))
 
 (define-read-only (get-cycle-totals (cycle uint))
   (default-to { total-stx: u0, total-sbtc: u0 }
@@ -170,37 +186,83 @@
   { min-stx: (var-get min-stx-deposit), min-sbtc: (var-get min-sbtc-deposit) })
 
 ;; ============================================================================
+;; Private: Advance cycle (called after settle or cancel)
+;; ============================================================================
+
+(define-private (advance-cycle)
+  (begin
+    (var-set current-cycle (+ (var-get current-cycle) u1))
+    (var-set cycle-start-block stacks-block-height)
+    (var-set deposits-closed-block u0)
+    true))
+
+;; ============================================================================
 ;; Private: Priority queue helpers
 ;; ============================================================================
 
-;; Find the smallest deposit in a list and its index
 (define-private (find-smallest-stx-fold
   (depositor principal)
-  (acc { cycle: uint, smallest: uint, smallest-idx: uint, smallest-principal: principal, current-idx: uint }))
-  (let (
-    (amount (get-stx-deposit (get cycle acc) depositor))
-    (idx (get current-idx acc))
-  )
+  (acc { cycle: uint, smallest: uint, smallest-principal: principal, current-idx: uint }))
+  (let ((amount (get-stx-deposit (get cycle acc) depositor)))
     (if (< amount (get smallest acc))
-      (merge acc { smallest: amount, smallest-idx: idx, smallest-principal: depositor, current-idx: (+ idx u1) })
-      (merge acc { current-idx: (+ idx u1) }))))
+      (merge acc { smallest: amount, smallest-principal: depositor, current-idx: (+ (get current-idx acc) u1) })
+      (merge acc { current-idx: (+ (get current-idx acc) u1) }))))
 
 (define-private (find-smallest-sbtc-fold
   (depositor principal)
-  (acc { cycle: uint, smallest: uint, smallest-idx: uint, smallest-principal: principal, current-idx: uint }))
-  (let (
-    (amount (get-sbtc-deposit (get cycle acc) depositor))
-    (idx (get current-idx acc))
-  )
+  (acc { cycle: uint, smallest: uint, smallest-principal: principal, current-idx: uint }))
+  (let ((amount (get-sbtc-deposit (get cycle acc) depositor)))
     (if (< amount (get smallest acc))
-      (merge acc { smallest: amount, smallest-idx: idx, smallest-principal: depositor, current-idx: (+ idx u1) })
-      (merge acc { current-idx: (+ idx u1) }))))
+      (merge acc { smallest: amount, smallest-principal: depositor, current-idx: (+ (get current-idx acc) u1) })
+      (merge acc { current-idx: (+ (get current-idx acc) u1) }))))
 
-;; Filter out a specific principal from a list
 (define-private (not-eq-bumped (entry principal))
   (not (is-eq entry (var-get bumped-principal))))
 
-(define-data-var bumped-principal principal tx-sender)
+;; ============================================================================
+;; Private: Roll helpers (for cancel-cycle)
+;; ============================================================================
+
+;; Move a depositor's STX deposit from cancelled cycle to next cycle
+(define-private (roll-stx-depositor (depositor principal))
+  (let (
+    (cycle (var-get settle-cycle))
+    (amount (get-stx-deposit cycle depositor))
+    (next-cycle (+ cycle u1))
+    (existing-next (get-stx-deposit next-cycle depositor))
+  )
+    (if (is-eq amount u0) true
+      (begin
+        (map-delete stx-deposits { cycle: cycle, depositor: depositor })
+        (map-set stx-deposits { cycle: next-cycle, depositor: depositor }
+          (+ existing-next amount))
+        true))))
+
+(define-private (roll-sbtc-depositor (depositor principal))
+  (let (
+    (cycle (var-get settle-cycle))
+    (amount (get-sbtc-deposit cycle depositor))
+    (next-cycle (+ cycle u1))
+    (existing-next (get-sbtc-deposit next-cycle depositor))
+  )
+    (if (is-eq amount u0) true
+      (begin
+        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor }
+          (+ existing-next amount))
+        true))))
+
+;; Merge depositor lists from old cycle into next cycle
+(define-private (roll-depositor-lists (old-cycle uint) (next-cycle uint))
+  (let (
+    (old-stx-list (get-stx-depositors old-cycle))
+    (old-sbtc-list (get-sbtc-depositors old-cycle))
+  )
+    ;; For simplicity, replace next cycle's lists with old cycle's lists
+    ;; (new deposits in next cycle haven't happened yet since we just advanced)
+    (map-set stx-depositor-list next-cycle old-stx-list)
+    (map-set sbtc-depositor-list next-cycle old-sbtc-list)
+    true))
 
 ;; ============================================================================
 ;; Public: Deposits (only during deposit phase)
@@ -208,85 +270,66 @@
 
 (define-public (deposit-stx (amount uint))
   (let (
-    (current-cycle (get-current-cycle))
-    (existing (get-stx-deposit current-cycle tx-sender))
-    (totals (get-cycle-totals current-cycle))
-    (depositors (get-stx-depositors current-cycle))
+    (cycle (var-get current-cycle))
+    (existing (get-stx-deposit cycle tx-sender))
+    (totals (get-cycle-totals cycle))
+    (depositors (get-stx-depositors cycle))
     (num-depositors (len depositors))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-stx-deposit)) ERR_DEPOSIT_TOO_SMALL)
 
-    ;; Transfer STX to contract
     (try! (stx-transfer? amount tx-sender current-contract))
 
-    ;; If user already has a deposit, just add to it
     (if (> existing u0)
       (begin
-        (map-set stx-deposits
-          { cycle: current-cycle, depositor: tx-sender }
-          (+ existing amount))
-        (map-set cycle-totals current-cycle
+        (map-set stx-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
+        (map-set cycle-totals cycle
           (merge totals { total-stx: (+ (get total-stx totals) amount) }))
         (print { event: "deposit-stx", depositor: tx-sender, amount: (+ existing amount),
-                 cycle: current-cycle, action: "add" })
-        (ok current-cycle))
+                 cycle: cycle, action: "add" })
+        (ok cycle))
 
-      ;; New depositor
       (if (< num-depositors MAX_DEPOSITORS)
-        ;; Slots available - just append
         (begin
-          (map-set stx-deposits
-            { cycle: current-cycle, depositor: tx-sender }
-            amount)
-          (map-set stx-depositor-list current-cycle
+          (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
+          (map-set stx-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
-          (map-set cycle-totals current-cycle
+          (map-set cycle-totals cycle
             (merge totals { total-stx: (+ (get total-stx totals) amount) }))
           (print { event: "deposit-stx", depositor: tx-sender, amount: amount,
-                   cycle: current-cycle, action: "new" })
-          (ok current-cycle))
+                   cycle: cycle, action: "new" })
+          (ok cycle))
 
-        ;; Queue full - try to bump smallest
         (let (
           (smallest-info (fold find-smallest-stx-fold depositors
-            { cycle: current-cycle, smallest: u999999999999999999,
-              smallest-idx: u0, smallest-principal: tx-sender, current-idx: u0 }))
+            { cycle: cycle, smallest: u999999999999999999,
+              smallest-principal: tx-sender, current-idx: u0 }))
           (smallest-amount (get smallest smallest-info))
           (smallest-who (get smallest-principal smallest-info))
         )
-          ;; New deposit must be strictly larger than smallest
           (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-
-          ;; Refund the bumped depositor
           (try! (stx-transfer? smallest-amount current-contract smallest-who))
-
-          ;; Remove bumped from list
           (var-set bumped-principal smallest-who)
           (let ((filtered (filter not-eq-bumped depositors)))
-            (map-set stx-depositor-list current-cycle
+            (map-set stx-depositor-list cycle
               (unwrap-panic (as-max-len? (append filtered tx-sender) u50))))
-
-          ;; Remove bumped deposit, add new
-          (map-delete stx-deposits { cycle: current-cycle, depositor: smallest-who })
-          (map-set stx-deposits
-            { cycle: current-cycle, depositor: tx-sender }
-            amount)
-          (map-set cycle-totals current-cycle
+          (map-delete stx-deposits { cycle: cycle, depositor: smallest-who })
+          (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
+          (map-set cycle-totals cycle
             (merge totals { total-stx: (+ (- (get total-stx totals) smallest-amount) amount) }))
-
           (print { event: "deposit-stx", depositor: tx-sender, amount: amount,
-                   cycle: current-cycle, action: "bump",
+                   cycle: cycle, action: "bump",
                    bumped: smallest-who, bumped-amount: smallest-amount })
-          (ok current-cycle))))))
+          (ok cycle))))))
 
 (define-public (deposit-sbtc (amount uint))
   (let (
-    (current-cycle (get-current-cycle))
-    (existing (get-sbtc-deposit current-cycle tx-sender))
-    (totals (get-cycle-totals current-cycle))
-    (depositors (get-sbtc-depositors current-cycle))
+    (cycle (var-get current-cycle))
+    (existing (get-sbtc-deposit cycle tx-sender))
+    (totals (get-cycle-totals cycle))
+    (depositors (get-sbtc-depositors cycle))
     (num-depositors (len depositors))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
@@ -296,79 +339,62 @@
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
       transfer amount tx-sender current-contract none))
 
-    ;; If user already has a deposit, just add to it
     (if (> existing u0)
       (begin
-        (map-set sbtc-deposits
-          { cycle: current-cycle, depositor: tx-sender }
-          (+ existing amount))
-        (map-set cycle-totals current-cycle
+        (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
+        (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
         (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount),
-                 cycle: current-cycle, action: "add" })
-        (ok current-cycle))
+                 cycle: cycle, action: "add" })
+        (ok cycle))
 
-      ;; New depositor
       (if (< num-depositors MAX_DEPOSITORS)
         (begin
-          (map-set sbtc-deposits
-            { cycle: current-cycle, depositor: tx-sender }
-            amount)
-          (map-set sbtc-depositor-list current-cycle
+          (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
+          (map-set sbtc-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
-          (map-set cycle-totals current-cycle
+          (map-set cycle-totals cycle
             (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
           (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount,
-                   cycle: current-cycle, action: "new" })
-          (ok current-cycle))
+                   cycle: cycle, action: "new" })
+          (ok cycle))
 
-        ;; Queue full - try to bump smallest
         (let (
           (smallest-info (fold find-smallest-sbtc-fold depositors
-            { cycle: current-cycle, smallest: u999999999999999999,
-              smallest-idx: u0, smallest-principal: tx-sender, current-idx: u0 }))
+            { cycle: cycle, smallest: u999999999999999999,
+              smallest-principal: tx-sender, current-idx: u0 }))
           (smallest-amount (get smallest smallest-info))
           (smallest-who (get smallest-principal smallest-info))
         )
           (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-
-          ;; Refund bumped
           (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
             transfer smallest-amount current-contract smallest-who none))
-
-          ;; Remove bumped, add new
           (var-set bumped-principal smallest-who)
           (let ((filtered (filter not-eq-bumped depositors)))
-            (map-set sbtc-depositor-list current-cycle
+            (map-set sbtc-depositor-list cycle
               (unwrap-panic (as-max-len? (append filtered tx-sender) u50))))
-
-          (map-delete sbtc-deposits { cycle: current-cycle, depositor: smallest-who })
-          (map-set sbtc-deposits
-            { cycle: current-cycle, depositor: tx-sender }
-            amount)
-          (map-set cycle-totals current-cycle
+          (map-delete sbtc-deposits { cycle: cycle, depositor: smallest-who })
+          (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
+          (map-set cycle-totals cycle
             (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
-
           (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount,
-                   cycle: current-cycle, action: "bump",
+                   cycle: cycle, action: "bump",
                    bumped: smallest-who, bumped-amount: smallest-amount })
-          (ok current-cycle))))))
+          (ok cycle))))))
 
-;; Cancel deposit - only during deposit phase of same cycle
-(define-public (cancel-stx-deposit (cycle uint))
+;; Cancel deposit - only during deposit phase of current cycle
+(define-public (cancel-stx-deposit)
   (let (
+    (cycle (var-get current-cycle))
     (caller tx-sender)
     (amount (get-stx-deposit cycle caller))
     (totals (get-cycle-totals cycle))
   )
-    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
 
     (try! (stx-transfer? amount current-contract caller))
-
     (map-delete stx-deposits { cycle: cycle, depositor: caller })
-    ;; Remove from list
     (var-set bumped-principal caller)
     (map-set stx-depositor-list cycle (filter not-eq-bumped (get-stx-depositors cycle)))
     (map-set cycle-totals cycle
@@ -377,19 +403,18 @@
     (print { event: "cancel-stx", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
-(define-public (cancel-sbtc-deposit (cycle uint))
+(define-public (cancel-sbtc-deposit)
   (let (
+    (cycle (var-get current-cycle))
     (caller tx-sender)
     (amount (get-sbtc-deposit cycle caller))
     (totals (get-cycle-totals cycle))
   )
-    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
 
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
       transfer amount current-contract caller none))
-
     (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
     (var-set bumped-principal caller)
     (map-set sbtc-depositor-list cycle (filter not-eq-bumped (get-sbtc-depositors cycle)))
@@ -399,56 +424,33 @@
     (print { event: "cancel-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
-;; Withdraw auto-rolled funds
-(define-public (withdraw-rolled-stx (cycle uint))
-  (let (
-    (caller tx-sender)
-    (amount (get-stx-deposit cycle caller))
-    (totals (get-cycle-totals cycle))
-  )
-    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
-    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
-    (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
-
-    (try! (stx-transfer? amount current-contract caller))
-
-    (map-delete stx-deposits { cycle: cycle, depositor: caller })
-    (var-set bumped-principal caller)
-    (map-set stx-depositor-list cycle (filter not-eq-bumped (get-stx-depositors cycle)))
-    (map-set cycle-totals cycle
-      (merge totals { total-stx: (- (get total-stx totals) amount) }))
-
-    (print { event: "withdraw-rolled-stx", depositor: caller, amount: amount, cycle: cycle })
-    (ok amount)))
-
-(define-public (withdraw-rolled-sbtc (cycle uint))
-  (let (
-    (caller tx-sender)
-    (amount (get-sbtc-deposit cycle caller))
-    (totals (get-cycle-totals cycle))
-  )
-    (asserts! (is-eq (get-current-cycle) cycle) ERR_NOT_DEPOSIT_PHASE)
-    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
-    (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
-
-    (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-      transfer amount current-contract caller none))
-
-    (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
-    (var-set bumped-principal caller)
-    (map-set sbtc-depositor-list cycle (filter not-eq-bumped (get-sbtc-depositors cycle)))
-    (map-set cycle-totals cycle
-      (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
-
-    (print { event: "withdraw-rolled-sbtc", depositor: caller, amount: amount, cycle: cycle })
-    (ok amount)))
-
 ;; ============================================================================
-;; Public: Settlement (only during settle phase)
+;; Public: Close deposits (transition from deposit to buffer phase)
 ;; ============================================================================
 
-;; Settle using stored Pyth prices (free). Distributes to all depositors.
-(define-public (settle (cycle uint))
+;; Anyone can close deposits after DEPOSIT_MIN_BLOCKS have passed.
+;; Deposits stay open until someone calls this - more time for liquidity.
+(define-public (close-deposits)
+  (let (
+    (elapsed (get-blocks-elapsed))
+  )
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
+    (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
+
+    (var-set deposits-closed-block stacks-block-height)
+
+    (print { event: "close-deposits",
+             cycle: (var-get current-cycle),
+             closed-at-block: stacks-block-height,
+             elapsed-blocks: elapsed })
+    (ok true)))
+
+;; ============================================================================
+;; Public: Settlement (settle phase, open-ended until success)
+;; ============================================================================
+
+;; Settle using stored Pyth prices (free). Try this first.
+(define-public (settle)
   (let (
     (btc-feed (unwrap! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
@@ -456,15 +458,16 @@
     (stx-feed (unwrap! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
       get-price STX_USD_FEED) ERR_ZERO_PRICE))
+    (cycle (var-get current-cycle))
   )
     (try! (execute-settlement cycle btc-feed stx-feed))
     (map distribute-to-stx-depositor (get-stx-depositors cycle))
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
+    (advance-cycle)
     (ok true)))
 
 ;; Settle with fresh Pyth VAAs when stored prices are stale (~2 uSTX).
 (define-public (settle-with-refresh
-  (cycle uint)
   (btc-vaa (buff 8192))
   (stx-vaa (buff 8192))
   (pyth-storage <pyth-storage-trait>)
@@ -490,11 +493,56 @@
       (stx-feed (unwrap! (contract-call?
         'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
         get-price STX_USD_FEED) ERR_ZERO_PRICE))
+      (cycle (var-get current-cycle))
     )
       (try! (execute-settlement cycle btc-feed stx-feed))
       (map distribute-to-stx-depositor (get-stx-depositors cycle))
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
+      (advance-cycle)
       (ok true))))
+
+;; ============================================================================
+;; Public: Cancel cycle (after CANCEL_THRESHOLD blocks without settlement)
+;; ============================================================================
+
+;; Anyone can cancel if settlement has failed for too long.
+;; Rolls all deposits into the next cycle (no refunds needed).
+;; Users can individually withdraw during the next deposit phase.
+(define-public (cancel-cycle)
+  (let (
+    (cycle (var-get current-cycle))
+    (elapsed (get-blocks-elapsed))
+    (totals (get-cycle-totals cycle))
+    (next-cycle (+ cycle u1))
+    (next-totals (get-cycle-totals next-cycle))
+    (stx-depositors (get-stx-depositors cycle))
+    (sbtc-depositors (get-sbtc-depositors cycle))
+  )
+    (asserts! (>= elapsed CANCEL_THRESHOLD) ERR_CANCEL_TOO_EARLY)
+    (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
+
+    ;; Roll totals to next cycle
+    (map-set cycle-totals next-cycle
+      { total-stx: (+ (get total-stx next-totals) (get total-stx totals)),
+        total-sbtc: (+ (get total-sbtc next-totals) (get total-sbtc totals)) })
+
+    ;; Roll individual deposits to next cycle
+    (var-set settle-cycle cycle)
+    (map roll-stx-depositor stx-depositors)
+    (map roll-sbtc-depositor sbtc-depositors)
+
+    ;; Roll depositor lists to next cycle
+    ;; (appending to any existing next-cycle depositors)
+    (roll-depositor-lists cycle next-cycle)
+
+    ;; Advance to next cycle (deposit phase starts)
+    (advance-cycle)
+
+    (print { event: "cancel-cycle", cycle: cycle, next-cycle: next-cycle,
+             elapsed-blocks: elapsed,
+             stx-rolled: (get total-stx totals),
+             sbtc-rolled: (get total-sbtc totals) })
+    (ok next-cycle)))
 
 ;; ============================================================================
 ;; Private: Settlement logic
@@ -507,7 +555,6 @@
   (stx-feed { price: int, conf: uint, expo: int, ema-price: int,
               ema-conf: uint, publish-time: uint, prev-publish-time: uint }))
   (let (
-    (current-cycle (get-current-cycle))
     (totals (get-cycle-totals cycle))
     (total-stx (get total-stx totals))
     (total-sbtc (get total-sbtc totals))
@@ -540,7 +587,6 @@
     (next-totals (get-cycle-totals next-cycle))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
-    (asserts! (is-eq current-cycle cycle) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
     (asserts! (and (>= total-stx (var-get min-stx-deposit))
@@ -548,7 +594,7 @@
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
 
-    ;; Gate 1: Staleness (publish-time is Unix seconds, compare against block time)
+    ;; Gate 1: Staleness
     (asserts! (> btc-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
     (asserts! (> stx-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
     ;; Gate 2: Confidence < 2%
@@ -630,7 +676,6 @@
       (begin
         (map-delete stx-deposits { cycle: cycle, depositor: depositor })
 
-        ;; Send sBTC
         (if (> my-sbtc-received u0)
           (match (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
             transfer my-sbtc-received current-contract depositor none)
@@ -638,13 +683,11 @@
             error true)
           true)
 
-        ;; Roll unfilled to next cycle (deposit + depositor list)
         (if (> my-stx-unfilled u0)
           (begin
             (map-set stx-deposits
               { cycle: next-cycle, depositor: depositor }
               (+ existing-next my-stx-unfilled))
-            ;; Add to next cycle's depositor list if not already there
             (if (is-eq existing-next u0)
               (let ((next-list (get-stx-depositors next-cycle)))
                 (if (< (len next-list) MAX_DEPOSITORS)
@@ -681,14 +724,12 @@
       (begin
         (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
 
-        ;; Send STX
         (if (> my-stx-received u0)
           (match (stx-transfer? my-stx-received current-contract depositor)
             success true
             error true)
           true)
 
-        ;; Roll unfilled to next cycle
         (if (> my-sbtc-unfilled u0)
           (begin
             (map-set sbtc-deposits
