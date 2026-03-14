@@ -91,7 +91,7 @@
 
 ;; Cycle state machine
 (define-data-var current-cycle uint u0)
-(define-data-var cycle-start-block uint u0)
+(define-data-var cycle-start-block uint stacks-block-height)
 ;; u0 = deposits still open, >0 = block when deposits were closed
 (define-data-var deposits-closed-block uint u0)
 
@@ -396,9 +396,7 @@
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
-
     (var-set deposits-closed-block stacks-block-height)
-
     (print { event: "close-deposits",
              cycle: (var-get current-cycle),
              closed-at-block: stacks-block-height,
