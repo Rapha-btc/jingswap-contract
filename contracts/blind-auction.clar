@@ -27,7 +27,7 @@
 ;; visible during deposit phase is guaranteed stale by settle time.
 ;; This prevents depositors from gaming a known settlement price.
 (define-constant BUFFER_BLOCKS u30)       ;; 30 blocks (~60s) >= MAX_STALENESS (60s)
-(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks from cycle start = anyone can cancel (~16 min)
+(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks after closed + buffer = anyone can cancel (~16 min)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
@@ -516,14 +516,17 @@
 (define-public (cancel-cycle)
   (let (
     (cycle (var-get current-cycle))
-    (elapsed (get-blocks-elapsed))
+    (closed-block (var-get deposits-closed-block))
     (totals (get-cycle-totals cycle))
     (next-cycle (+ cycle u1))
     (next-totals (get-cycle-totals next-cycle))
     (stx-depositors (get-stx-depositors cycle))
     (sbtc-depositors (get-sbtc-depositors cycle))
   )
-    (asserts! (>= elapsed CANCEL_THRESHOLD) ERR_CANCEL_TOO_EARLY)
+    (asserts! (> closed-block u0) ERR_NOT_SETTLE_PHASE)
+    (asserts! (>= stacks-block-height
+                  (+ closed-block BUFFER_BLOCKS CANCEL_THRESHOLD))
+              ERR_CANCEL_TOO_EARLY)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
 
     ;; Roll totals to next cycle
