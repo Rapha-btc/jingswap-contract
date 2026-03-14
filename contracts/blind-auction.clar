@@ -510,11 +510,8 @@
     (btc-price (to-uint (get price btc-feed)))
     (stx-price (to-uint (get price stx-feed)))
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
-
     (dex-price (get-dex-price))
-
     (stx-value-of-sbtc (/ (* total-sbtc oracle-price) PRICE_PRECISION))
-
     (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
     (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
     (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx PRICE_PRECISION) oracle-price)))
@@ -522,6 +519,7 @@
     (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
     (stx-unfilled (- total-stx stx-clearing))
     (sbtc-unfilled (- total-sbtc sbtc-clearing))
+    (min-freshness (- stacks-block-time MAX_STALENESS))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
@@ -530,17 +528,16 @@
                    (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
-
     ;; Gate 1: Staleness
-    (asserts! (> (get publish-time btc-feed) (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
-    (asserts! (> (get publish-time stx-feed) (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
+    (asserts! (> (get publish-time btc-feed) min-freshness) ERR_STALE_PRICE)
+    (asserts! (> (get publish-time stx-feed) min-freshness) ERR_STALE_PRICE)
     ;; Gate 2: Confidence < 2%
     (asserts! (< (get conf btc-feed) (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     (asserts! (< (get conf stx-feed) (/ stx-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     ;; Gate 3: DEX sanity < 10%
-    (asserts! (< (if (> oracle-price dex-price) (- oracle-price dex-price) (- dex-price oracle-price))
+    (asserts! (< (if (> oracle-price dex-price) 
+                    (- oracle-price dex-price) (- dex-price oracle-price))
                  (/ oracle-price MAX_DEX_DEVIATION)) ERR_PRICE_DEX_DIVERGENCE)
-
     ;; Record settlement
     (map-set settlements cycle
       { price: oracle-price,
@@ -549,29 +546,26 @@
         stx-fee: stx-fee,
         sbtc-fee: sbtc-fee,
         settled-at: stacks-block-height })
-
     ;; Fees to treasury
     (if (> stx-fee u0)
-      (try! (stx-transfer? stx-fee current-contract (var-get treasury)))
+      (try! (as-contract? ((with-stx stx-fee))
+        (try! (stx-transfer? stx-fee current-contract (var-get treasury)))))
       true)
     (if (> sbtc-fee u0)
-      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer sbtc-fee current-contract (var-get treasury) none))
+      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sbtc-fee))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+         transfer sbtc-fee current-contract (var-get treasury) none))))
       true)
-
     ;; Auto-roll unfilled totals into next cycle
     (map-set cycle-totals (+ cycle u1)
       { total-stx: stx-unfilled, total-sbtc: sbtc-unfilled })
-
     ;; Set context for distribute functions
-
     (var-set settle-stx-cleared stx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
     (var-set settle-total-stx total-stx)
     (var-set settle-total-sbtc total-sbtc)
     (var-set settle-sbtc-after-fee (- sbtc-clearing sbtc-fee))
     (var-set settle-stx-after-fee (- stx-clearing stx-fee))
-
     (print {
       event: "settlement",
       cycle: cycle,
