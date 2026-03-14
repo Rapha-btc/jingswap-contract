@@ -543,8 +543,7 @@
     (asserts! (is-eq current-cycle cycle) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-    (asserts! (and (>= total-stx (var-get min-stx-deposit))
-                   (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
+    (asserts! (and (> total-stx u0) (> total-sbtc u0)) ERR_NOTHING_TO_SETTLE)
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
 
@@ -779,27 +778,3 @@
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
     (ok (var-set min-sbtc-deposit amount))))
-
-;; Sweep dust: owner can withdraw STX and sBTC below minimum thresholds
-;; Only works when amounts are below min deposits (rounding leftovers)
-(define-public (sweep-dust)
-  (let (
-    (stx-balance (stx-get-balance current-contract))
-    (sbtc-balance (unwrap-panic (contract-call?
-      'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-      get-balance current-contract)))
-  )
-    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
-    (asserts! (< stx-balance (var-get min-stx-deposit)) ERR_NOT_AUTHORIZED)
-    (asserts! (< sbtc-balance (var-get min-sbtc-deposit)) ERR_NOT_AUTHORIZED)
-
-    (if (> stx-balance u0)
-      (try! (stx-transfer? stx-balance current-contract (var-get treasury)))
-      true)
-    (if (> sbtc-balance u0)
-      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer sbtc-balance current-contract (var-get treasury) none))
-      true)
-
-    (print { event: "sweep-dust", stx-swept: stx-balance, sbtc-swept: sbtc-balance })
-    (ok { stx-swept: stx-balance, sbtc-swept: sbtc-balance })))
