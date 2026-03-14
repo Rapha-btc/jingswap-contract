@@ -543,7 +543,8 @@
     (asserts! (is-eq current-cycle cycle) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-    (asserts! (and (> total-stx u0) (> total-sbtc u0)) ERR_NOTHING_TO_SETTLE)
+    (asserts! (and (>= total-stx (var-get min-stx-deposit))
+                   (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
 
