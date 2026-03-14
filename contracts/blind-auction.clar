@@ -317,8 +317,9 @@
         (smallest-who (get smallest-principal smallest-info))
       )
         (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-          transfer smallest-amount current-contract smallest-who none))
+        (as-contract? ((with-sbtc smallest-amount))
+          (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+            transfer smallest-amount current-contract smallest-who none)))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer amount tx-sender current-contract none))
         (var-set bumped-principal smallest-who)
@@ -330,7 +331,7 @@
           (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
         (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
-        (ok cycle))
+        (ok amount))
 
       ;; Normal: add or top up
       (begin
@@ -344,7 +345,7 @@
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
         (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
-        (ok cycle)))))
+        (ok amount)))))
 
 ;; Cancel deposit - only during deposit phase of current cycle
 (define-public (cancel-stx-deposit)
