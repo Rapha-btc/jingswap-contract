@@ -20,6 +20,8 @@ DEPOSIT (open-ended, min 150 blocks / ~5 min)
   |
   someone calls close-deposits()     <-- only after 150 blocks
   |
+BUFFER (30 blocks / ~60s)            <-- no actions, stale prices expire
+  |
 SETTLE (open-ended until success)
   |
   settle() succeeds --> next cycle starts, deposit phase open
@@ -30,9 +32,10 @@ SETTLE (open-ended until success)
 ```
 
 1. **Deposit** — Lock sBTC or STX. Stays open until someone calls `close-deposits()` (min 150 blocks). More time = more liquidity. 50 slots per side — when full, larger deposits bump the smallest (bumped depositor is refunded instantly).
-2. **Close deposits** — Anyone can call after 150 blocks. Transitions directly to settle phase. No more deposits accepted.
-3. **Settle** — Anyone calls `settle()`. Reads Pyth spot price, validates 3 safety gates, computes pro-rata fills, sends tokens directly to all depositors. Unfilled auto-rolls to next cycle.
-4. **Cancel** — If settlement keeps failing (500+ blocks from cycle start), anyone can cancel. All deposits roll to next cycle. Users can individually withdraw during the next deposit phase.
+2. **Close deposits** — Anyone can call after 150 blocks. No more deposits or cancellations accepted.
+3. **Buffer** — 30 blocks (~60 seconds). No actions allowed. This is a security feature: any Pyth price that was visible during the deposit phase becomes stale (>60s old) by the time settlement opens. This prevents depositors from gaming a known settlement price. The buffer duration matches `MAX_STALENESS` so the settler MUST push a fresh price.
+4. **Settle** — Anyone calls `settle()`. Reads Pyth spot price, validates 3 safety gates, computes pro-rata fills, sends tokens directly to all depositors. Unfilled auto-rolls to next cycle.
+5. **Cancel** — If settlement keeps failing (500+ blocks from cycle start), anyone can cancel. All deposits roll to next cycle. Users can individually withdraw during the next deposit phase.
 
 ### Anti-Gaming Properties
 
@@ -46,13 +49,15 @@ SETTLE (open-ended until success)
 
 ### Fair Information Symmetry
 
-There is no buffer between deposit close and settlement. Depositors can see the current Pyth price at any point during the deposit phase. This is not an exploit — it's a feature:
+Depositors can see the current Pyth price during the deposit phase. This is not an exploit — it's fair:
 
 - **Early depositors** can cancel anytime during the deposit phase if the price moves against them
 - **Late depositors** have more price certainty but get the same settlement price as everyone else
 - **No one gets a better price** — everyone settles at the same uniform oracle price
 
-The "blind" protection is not about hiding the price. It's that no one can sandwich, front-run, or get a different price through transaction ordering. The price is oracle-set, uniform for all, and MEV-free.
+The "blind" protection is not about hiding the price. It's that no one can sandwich, front-run, or get a different price through transaction ordering.
+
+**Why the buffer matters:** Without a buffer, someone could deposit at minute 4, see the current Pyth price, call `close-deposits()` then `settle()` in the next block using that same stale price — they'd know their exact fill price before committing. The 60-second buffer ensures any price visible during deposits is stale by settle time, forcing a fresh price push. The settlement price is always unknown at deposit time.
 
 ### Three Safety Gates
 
@@ -73,6 +78,8 @@ Every phase transition is explicit — someone must call a function. No automati
 ```
 deposit phase (open-ended)
   --> close-deposits()        anyone, after 150 blocks
+buffer (30 blocks)            stale prices expire, no actions
+  --> (automatic)
 settle phase (open-ended)
   --> settle() succeeds       anyone, advance cycle, deposit phase starts
   --> cancel-cycle()          anyone after 500 blocks, roll deposits, advance cycle
@@ -149,6 +156,7 @@ Admin-switchable between two BitFlow pools:
 | Parameter | Value | Adjustable |
 |-----------|-------|-----------|
 | Min deposit window | 150 blocks (~5 min) | No |
+| Buffer after close | 30 blocks (~60s, matches staleness) | No |
 | Cancel threshold | 500 blocks (~16 min) | No |
 | Fee | 10 bps (0.10%) per side | No |
 | Max depositors per side | 50 | No |

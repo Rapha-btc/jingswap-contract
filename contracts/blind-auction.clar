@@ -23,11 +23,16 @@
 
 ;; Cycle phase thresholds (in blocks, ~2s each)
 (define-constant DEPOSIT_MIN_BLOCKS u150) ;; min 150 blocks before deposits can be closed (~5 min)
+;; Buffer must be >= MAX_STALENESS worth of blocks so that any price
+;; visible during deposit phase is guaranteed stale by settle time.
+;; This prevents depositors from gaming a known settlement price.
+(define-constant BUFFER_BLOCKS u30)       ;; 30 blocks (~60s) >= MAX_STALENESS (60s)
 (define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks from cycle start = anyone can cancel (~16 min)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
-(define-constant PHASE_SETTLE u1)
+(define-constant PHASE_BUFFER u1)
+(define-constant PHASE_SETTLE u2)
 
 ;; Max depositors per side per cycle
 (define-constant MAX_DEPOSITORS u50)
@@ -148,10 +153,17 @@
 (define-read-only (get-blocks-elapsed)
   (- stacks-block-height (var-get cycle-start-block)))
 
+;; Phase logic:
+;; - deposits-closed-block = 0: deposits still open
+;; - closed but buffer not passed: buffer (no actions)
+;; - buffer passed: settle
 (define-read-only (get-cycle-phase)
-  (if (is-eq (var-get deposits-closed-block) u0)
-    PHASE_DEPOSIT
-    PHASE_SETTLE))
+  (let ((closed-block (var-get deposits-closed-block)))
+    (if (is-eq closed-block u0)
+      PHASE_DEPOSIT
+      (if (< stacks-block-height (+ closed-block BUFFER_BLOCKS))
+        PHASE_BUFFER
+        PHASE_SETTLE))))
 
 (define-read-only (get-cycle-totals (cycle uint))
   (default-to { total-stx: u0, total-sbtc: u0 }
