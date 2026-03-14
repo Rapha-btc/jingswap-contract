@@ -1,9 +1,9 @@
 ;; title: blind-auction
-;; version: 0.6.0
+;; version: 0.7.0
 ;; summary: Blind batch auction for sBTC/STX swaps at synthetic oracle price
 ;; description:
-;;   8-minute cycle: 5 min deposit, 1 min buffer, 2 min settle window.
-;;   50 slots per side. When full, larger deposits bump out smallest.
+;;   ~8-minute cycle (block-based): ~50 blocks deposit, ~10 blocks buffer,
+;;   ~20 blocks settle window. 50 slots per side, larger deposits bump smallest.
 ;;   Settlement reads Pyth spot price, validates 3 safety gates, then
 ;;   pushes tokens directly to all depositors. Unfilled auto-rolls.
 
@@ -19,10 +19,11 @@
 ;; Constants
 ;; ============================================================================
 
-;; Cycle timing (seconds)
-(define-constant CYCLE_LENGTH u480)    ;; 8 minutes
-(define-constant DEPOSIT_END u300)     ;; 0:00 - 5:00 deposit window
-(define-constant SETTLE_START u360)    ;; 6:00 settle window opens (1 min buffer)
+;; Cycle timing (in Stacks blocks, ~5-10s each)
+;; ~80 blocks = ~8 minutes at ~6s/block
+(define-constant CYCLE_LENGTH u80)
+(define-constant DEPOSIT_END u50)      ;; blocks 0-50: deposit window (~5 min)
+(define-constant SETTLE_START u60)     ;; blocks 60-80: settle window (~2 min, 10 block buffer)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
@@ -132,10 +133,10 @@
 ;; ============================================================================
 
 (define-read-only (get-current-cycle)
-  (/ stacks-block-time CYCLE_LENGTH))
+  (/ stacks-block-height CYCLE_LENGTH))
 
 (define-read-only (get-cycle-phase)
-  (let ((elapsed (mod stacks-block-time CYCLE_LENGTH)))
+  (let ((elapsed (mod stacks-block-height CYCLE_LENGTH)))
     (if (<= elapsed DEPOSIT_END) PHASE_DEPOSIT
       (if (< elapsed SETTLE_START) PHASE_BUFFER
         PHASE_SETTLE))))
@@ -542,11 +543,11 @@
     (asserts! (is-eq current-cycle cycle) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-    (asserts! (or (> total-stx u0) (> total-sbtc u0)) ERR_NOTHING_TO_SETTLE)
+    (asserts! (and (> total-stx u0) (> total-sbtc u0)) ERR_NOTHING_TO_SETTLE)
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
 
-    ;; Gate 1: Staleness
+    ;; Gate 1: Staleness (publish-time is Unix seconds, compare against block time)
     (asserts! (> btc-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
     (asserts! (> stx-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
     ;; Gate 2: Confidence < 2%
@@ -562,7 +563,7 @@
         sbtc-cleared: sbtc-clearing,
         stx-fee: stx-fee,
         sbtc-fee: sbtc-fee,
-        settled-at: stacks-block-time })
+        settled-at: stacks-block-height })
 
     ;; Fees to treasury
     (if (> stx-fee u0)
