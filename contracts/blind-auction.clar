@@ -395,9 +395,12 @@
 (define-public (close-deposits)
   (let (
     (elapsed (get-blocks-elapsed))
+    (totals (get-cycle-totals (var-get current-cycle)))
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
+    (asserts! (and (>= (get total-stx totals) (var-get min-stx-deposit))
+                   (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (var-set deposits-closed-block stacks-block-height)
     (print { event: "close-deposits",
              cycle: (var-get current-cycle),
@@ -504,7 +507,6 @@
     (totals (get-cycle-totals cycle))
     (total-stx (get total-stx totals))
     (total-sbtc (get total-sbtc totals))
-
     (btc-price (to-uint (get price btc-feed)))
     (stx-price (to-uint (get price stx-feed)))
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
