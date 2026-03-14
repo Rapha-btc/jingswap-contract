@@ -266,7 +266,6 @@
     (asserts! (>= amount (var-get min-stx-deposit)) ERR_DEPOSIT_TOO_SMALL)
 
     (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
-      ;; Bump: evict smallest, take their slot
       (let (
         (smallest-info (fold find-smallest-stx-fold depositors
           { cycle: cycle, smallest: u999999999999999999, smallest-principal: tx-sender }))
@@ -274,8 +273,8 @@
         (smallest-who (get smallest-principal smallest-info))
       )
         (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-        (as-contract? ((with-stx smallest-amount))
-          (try! (stx-transfer? smallest-amount current-contract smallest-who)))
+        (try! (as-contract? ((with-stx smallest-amount))
+          (try! (stx-transfer? smallest-amount current-contract smallest-who))))
         (try! (stx-transfer? amount tx-sender current-contract))
         (var-set bumped-stx-principal smallest-who)
         (map-set stx-depositor-list cycle
@@ -287,8 +286,6 @@
         (print { event: "deposit-stx", depositor: tx-sender, amount: amount, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
         (ok amount))
-
-      ;; Normal: add or top up
       (begin
         (try! (stx-transfer? amount tx-sender current-contract))
         (map-set stx-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
@@ -311,9 +308,7 @@
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-sbtc-deposit)) ERR_DEPOSIT_TOO_SMALL)
-
     (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
-      ;; Bump: evict smallest, take their slot
       (let (
         (smallest-info (fold find-smallest-sbtc-fold depositors
           { cycle: cycle, smallest: u999999999999999999, smallest-principal: tx-sender }))
@@ -321,9 +316,9 @@
         (smallest-who (get smallest-principal smallest-info))
       )
         (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-        (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" smallest-amount))
+        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" smallest-amount))
           (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-            transfer smallest-amount current-contract smallest-who none)))
+            transfer smallest-amount current-contract smallest-who none))))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer amount tx-sender current-contract none))
         (var-set bumped-sbtc-principal smallest-who)
@@ -336,8 +331,6 @@
         (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
         (ok amount))
-
-      ;; Normal: add or top up
       (begin
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer amount tx-sender current-contract none))
