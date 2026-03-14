@@ -198,8 +198,7 @@
   (begin
     (var-set current-cycle (+ (var-get current-cycle) u1))
     (var-set cycle-start-block stacks-block-height)
-    (var-set deposits-closed-block u0)
-    true))
+    (var-set deposits-closed-block u0)))
 
 ;; ============================================================================
 ;; Private: Priority queue helpers
@@ -207,19 +206,19 @@
 
 (define-private (find-smallest-stx-fold
   (depositor principal)
-  (acc { cycle: uint, smallest: uint, smallest-principal: principal, current-idx: uint }))
+  (acc { cycle: uint, smallest: uint, smallest-principal: principal }))
   (let ((amount (get-stx-deposit (get cycle acc) depositor)))
     (if (< amount (get smallest acc))
-      (merge acc { smallest: amount, smallest-principal: depositor, current-idx: (+ (get current-idx acc) u1) })
-      (merge acc { current-idx: (+ (get current-idx acc) u1) }))))
+      (merge acc { smallest: amount, smallest-principal: depositor })
+      acc)))
 
 (define-private (find-smallest-sbtc-fold
   (depositor principal)
-  (acc { cycle: uint, smallest: uint, smallest-principal: principal, current-idx: uint }))
+  (acc { cycle: uint, smallest: uint, smallest-principal: principal }))
   (let ((amount (get-sbtc-deposit (get cycle acc) depositor)))
     (if (< amount (get smallest acc))
-      (merge acc { smallest: amount, smallest-principal: depositor, current-idx: (+ (get current-idx acc) u1) })
-      (merge acc { current-idx: (+ (get current-idx acc) u1) }))))
+      (merge acc { smallest: amount, smallest-principal: depositor })
+      acc)))
 
 (define-private (not-eq-bumped (entry principal))
   (not (is-eq entry (var-get bumped-principal))))
@@ -230,40 +229,22 @@
 
 ;; Move a depositor's STX deposit from cancelled cycle to next cycle
 (define-private (roll-stx-depositor (depositor principal))
-  (let (
-    (cycle (var-get settle-cycle))
-    (amount (get-stx-deposit cycle depositor))
-    (next-cycle (+ cycle u1))
-  )
-    (if (is-eq amount u0) true
-      (begin
-        (map-delete stx-deposits { cycle: cycle, depositor: depositor })
-        (map-set stx-deposits { cycle: next-cycle, depositor: depositor } amount)
-        true))))
+  (let ((cycle (var-get settle-cycle)))
+    (map-set stx-deposits { cycle: (+ cycle u1), depositor: depositor }
+      (get-stx-deposit cycle depositor))
+    (map-delete stx-deposits { cycle: cycle, depositor: depositor })))
 
 (define-private (roll-sbtc-depositor (depositor principal))
-  (let (
-    (cycle (var-get settle-cycle))
-    (amount (get-sbtc-deposit cycle depositor))
-    (next-cycle (+ cycle u1))
-  )
-    (if (is-eq amount u0) true
-      (begin
-        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
-        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
-        true))))
+  (let ((cycle (var-get settle-cycle)))
+    (map-set sbtc-deposits { cycle: (+ cycle u1), depositor: depositor }
+      (get-sbtc-deposit cycle depositor))
+    (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })))
 
 ;; Merge depositor lists from old cycle into next cycle
-(define-private (roll-depositor-lists (old-cycle uint) (next-cycle uint))
-  (let (
-    (old-stx-list (get-stx-depositors old-cycle))
-    (old-sbtc-list (get-sbtc-depositors old-cycle))
-  )
-    ;; For simplicity, replace next cycle's lists with old cycle's lists
-    ;; (new deposits in next cycle haven't happened yet since we just advanced)
-    (map-set stx-depositor-list next-cycle old-stx-list)
-    (map-set sbtc-depositor-list next-cycle old-sbtc-list)
-    true))
+(define-private (roll-depositor-lists (cycle uint))
+  (begin
+    (map-set stx-depositor-list (+ cycle u1) (get-stx-depositors cycle))
+    (map-set sbtc-depositor-list (+ cycle u1) (get-sbtc-depositors cycle))))
 
 ;; ============================================================================
 ;; Public: Deposits (only during deposit phase)
@@ -275,55 +256,46 @@
     (existing (get-stx-deposit cycle tx-sender))
     (totals (get-cycle-totals cycle))
     (depositors (get-stx-depositors cycle))
-    (num-depositors (len depositors))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-stx-deposit)) ERR_DEPOSIT_TOO_SMALL)
 
-    (try! (stx-transfer? amount tx-sender current-contract))
+    (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
+      ;; Bump: evict smallest, take their slot
+      (let (
+        (smallest-info (fold find-smallest-stx-fold depositors
+          { cycle: cycle, smallest: u999999999999999999, smallest-principal: tx-sender }))
+        (smallest-amount (get smallest smallest-info))
+        (smallest-who (get smallest-principal smallest-info))
+      )
+        (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
+        (as-contract? ((with-stx smallest-amount))
+          (try! (stx-transfer? smallest-amount current-contract smallest-who)))
+        (try! (stx-transfer? amount tx-sender current-contract))
+        (var-set bumped-principal smallest-who)
+        (map-set stx-depositor-list cycle
+          (unwrap-panic (as-max-len? (append (filter not-eq-bumped depositors) tx-sender) u50)))
+        (map-delete stx-deposits { cycle: cycle, depositor: smallest-who })
+        (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (map-set cycle-totals cycle
+          (merge totals { total-stx: (+ (- (get total-stx totals) smallest-amount) amount) }))
+        (print { event: "deposit-stx", depositor: tx-sender, amount: amount, cycle: cycle,
+                 bumped: smallest-who, bumped-amount: smallest-amount })
+        (ok amount))
 
-    (if (> existing u0)
+      ;; Normal: add or top up
       (begin
+        (try! (stx-transfer? amount tx-sender current-contract))
         (map-set stx-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
         (map-set cycle-totals cycle
           (merge totals { total-stx: (+ (get total-stx totals) amount) }))
-        (print { event: "deposit-stx", depositor: tx-sender, amount: (+ existing amount),
-                 cycle: cycle, action: "add" })
-        (ok cycle))
-
-      (if (< num-depositors MAX_DEPOSITORS)
-        (begin
-          (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (if (is-eq existing u0)
           (map-set stx-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
-          (map-set cycle-totals cycle
-            (merge totals { total-stx: (+ (get total-stx totals) amount) }))
-          (print { event: "deposit-stx", depositor: tx-sender, amount: amount,
-                   cycle: cycle, action: "new" })
-          (ok cycle))
-
-        (let (
-          (smallest-info (fold find-smallest-stx-fold depositors
-            { cycle: cycle, smallest: u999999999999999999,
-              smallest-principal: tx-sender, current-idx: u0 }))
-          (smallest-amount (get smallest smallest-info))
-          (smallest-who (get smallest-principal smallest-info))
-        )
-          (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-          (try! (stx-transfer? smallest-amount current-contract smallest-who))
-          (var-set bumped-principal smallest-who)
-          (let ((filtered (filter not-eq-bumped depositors)))
-            (map-set stx-depositor-list cycle
-              (unwrap-panic (as-max-len? (append filtered tx-sender) u50))))
-          (map-delete stx-deposits { cycle: cycle, depositor: smallest-who })
-          (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
-          (map-set cycle-totals cycle
-            (merge totals { total-stx: (+ (- (get total-stx totals) smallest-amount) amount) }))
-          (print { event: "deposit-stx", depositor: tx-sender, amount: amount,
-                   cycle: cycle, action: "bump",
-                   bumped: smallest-who, bumped-amount: smallest-amount })
-          (ok cycle))))))
+          true)
+        (print { event: "deposit-stx", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
+        (ok cycle)))))
 
 (define-public (deposit-sbtc (amount uint))
   (let (
@@ -331,57 +303,48 @@
     (existing (get-sbtc-deposit cycle tx-sender))
     (totals (get-cycle-totals cycle))
     (depositors (get-sbtc-depositors cycle))
-    (num-depositors (len depositors))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-sbtc-deposit)) ERR_DEPOSIT_TOO_SMALL)
 
-    (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-      transfer amount tx-sender current-contract none))
+    (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
+      ;; Bump: evict smallest, take their slot
+      (let (
+        (smallest-info (fold find-smallest-sbtc-fold depositors
+          { cycle: cycle, smallest: u999999999999999999, smallest-principal: tx-sender }))
+        (smallest-amount (get smallest smallest-info))
+        (smallest-who (get smallest-principal smallest-info))
+      )
+        (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer smallest-amount current-contract smallest-who none))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer amount tx-sender current-contract none))
+        (var-set bumped-principal smallest-who)
+        (map-set sbtc-depositor-list cycle
+          (unwrap-panic (as-max-len? (append (filter not-eq-bumped depositors) tx-sender) u50)))
+        (map-delete sbtc-deposits { cycle: cycle, depositor: smallest-who })
+        (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (map-set cycle-totals cycle
+          (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
+        (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, cycle: cycle,
+                 bumped: smallest-who, bumped-amount: smallest-amount })
+        (ok cycle))
 
-    (if (> existing u0)
+      ;; Normal: add or top up
       (begin
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer amount tx-sender current-contract none))
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount),
-                 cycle: cycle, action: "add" })
-        (ok cycle))
-
-      (if (< num-depositors MAX_DEPOSITORS)
-        (begin
-          (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (if (is-eq existing u0)
           (map-set sbtc-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
-          (map-set cycle-totals cycle
-            (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
-          (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount,
-                   cycle: cycle, action: "new" })
-          (ok cycle))
-
-        (let (
-          (smallest-info (fold find-smallest-sbtc-fold depositors
-            { cycle: cycle, smallest: u999999999999999999,
-              smallest-principal: tx-sender, current-idx: u0 }))
-          (smallest-amount (get smallest smallest-info))
-          (smallest-who (get smallest-principal smallest-info))
-        )
-          (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-          (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-            transfer smallest-amount current-contract smallest-who none))
-          (var-set bumped-principal smallest-who)
-          (let ((filtered (filter not-eq-bumped depositors)))
-            (map-set sbtc-depositor-list cycle
-              (unwrap-panic (as-max-len? (append filtered tx-sender) u50))))
-          (map-delete sbtc-deposits { cycle: cycle, depositor: smallest-who })
-          (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
-          (map-set cycle-totals cycle
-            (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
-          (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount,
-                   cycle: cycle, action: "bump",
-                   bumped: smallest-who, bumped-amount: smallest-amount })
-          (ok cycle))))))
+          true)
+        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
+        (ok cycle)))))
 
 ;; Cancel deposit - only during deposit phase of current cycle
 (define-public (cancel-stx-deposit)
@@ -516,8 +479,6 @@
     (totals (get-cycle-totals cycle))
     (next-cycle (+ cycle u1))
     (next-totals (get-cycle-totals next-cycle))
-    (stx-depositors (get-stx-depositors cycle))
-    (sbtc-depositors (get-sbtc-depositors cycle))
   )
     (asserts! (> closed-block u0) ERR_NOT_SETTLE_PHASE)
     (asserts! (>= stacks-block-height
@@ -532,18 +493,16 @@
 
     ;; Roll individual deposits to next cycle
     (var-set settle-cycle cycle)
-    (map roll-stx-depositor stx-depositors)
-    (map roll-sbtc-depositor sbtc-depositors)
+    (map roll-stx-depositor (get-stx-depositors cycle))
+    (map roll-sbtc-depositor (get-sbtc-depositors cycle))
 
     ;; Roll depositor lists to next cycle
-    ;; (appending to any existing next-cycle depositors)
-    (roll-depositor-lists cycle next-cycle)
+    (roll-depositor-lists cycle)
 
     ;; Advance to next cycle (deposit phase starts)
     (advance-cycle)
 
     (print { event: "cancel-cycle", cycle: cycle, next-cycle: next-cycle,
-             elapsed-blocks: elapsed,
              stx-rolled: (get total-stx totals),
              sbtc-rolled: (get total-sbtc totals) })
     (ok next-cycle)))
@@ -565,18 +524,9 @@
 
     (btc-price (to-uint (get price btc-feed)))
     (stx-price (to-uint (get price stx-feed)))
-    (btc-conf (get conf btc-feed))
-    (stx-conf (get conf stx-feed))
-    (btc-publish-time (get publish-time btc-feed))
-    (stx-publish-time (get publish-time stx-feed))
-
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
 
     (dex-price (get-dex-price))
-    (price-diff (if (> oracle-price dex-price)
-      (- oracle-price dex-price)
-      (- dex-price oracle-price)))
-    (max-allowed-diff (/ oracle-price MAX_DEX_DEVIATION))
 
     (stx-value-of-sbtc (/ (* total-sbtc oracle-price) PRICE_PRECISION))
 
@@ -599,13 +549,14 @@
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
 
     ;; Gate 1: Staleness
-    (asserts! (> btc-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
-    (asserts! (> stx-publish-time (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
+    (asserts! (> (get publish-time btc-feed) (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
+    (asserts! (> (get publish-time stx-feed) (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
     ;; Gate 2: Confidence < 2%
-    (asserts! (< btc-conf (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
-    (asserts! (< stx-conf (/ stx-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
+    (asserts! (< (get conf btc-feed) (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
+    (asserts! (< (get conf stx-feed) (/ stx-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     ;; Gate 3: DEX sanity < 10%
-    (asserts! (< price-diff max-allowed-diff) ERR_PRICE_DEX_DIVERGENCE)
+    (asserts! (< (if (> oracle-price dex-price) (- oracle-price dex-price) (- dex-price oracle-price))
+                 (/ oracle-price MAX_DEX_DEVIATION)) ERR_PRICE_DEX_DIVERGENCE)
 
     ;; Record settlement
     (map-set settlements cycle
@@ -668,11 +619,8 @@
     (cycle (var-get settle-cycle))
     (my-deposit (get-stx-deposit cycle depositor))
     (total-stx (var-get settle-total-stx))
-    (stx-cleared (var-get settle-stx-cleared))
-    (sbtc-after-fee (var-get settle-sbtc-after-fee))
-    ;; Direct single-division: avoids compounded rounding loss
-    (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit sbtc-after-fee) total-stx) u0))
-    (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx stx-cleared)) total-stx) u0))
+    (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit (var-get settle-sbtc-after-fee)) total-stx) u0))
+    (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx (var-get settle-stx-cleared))) total-stx) u0))
     (next-cycle (+ cycle u1))
   )
     (if (is-eq my-deposit u0) true
@@ -712,11 +660,8 @@
     (cycle (var-get settle-cycle))
     (my-deposit (get-sbtc-deposit cycle depositor))
     (total-sbtc (var-get settle-total-sbtc))
-    (sbtc-cleared (var-get settle-sbtc-cleared))
-    (stx-after-fee (var-get settle-stx-after-fee))
-    ;; Direct single-division: avoids compounded rounding loss
-    (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit stx-after-fee) total-sbtc) u0))
-    (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc sbtc-cleared)) total-sbtc) u0))
+    (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit (var-get settle-stx-after-fee)) total-sbtc) u0))
+    (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc (var-get settle-sbtc-cleared))) total-sbtc) u0))
     (next-cycle (+ cycle u1))
   )
     (if (is-eq my-deposit u0) true
@@ -759,28 +704,18 @@
     (get-dlmm-price)))
 
 (define-read-only (get-xyk-price)
-  (let (
-    (pool (unwrap-panic (contract-call?
-      'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
-      get-pool)))
-    (x-bal (get x-balance pool))
-    (y-bal (get y-balance pool))
-  )
-    (/ (* y-bal u100 PRICE_PRECISION) x-bal)))
+  (let ((pool (unwrap-panic (contract-call?
+    'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
+    get-pool))))
+    (/ (* (get y-balance pool) u100 PRICE_PRECISION) (get x-balance pool))))
 
 (define-read-only (get-dlmm-price)
-  (let (
-    (pool (unwrap-panic (contract-call?
-      'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15
-      get-pool)))
-    (active-bin-id (get active-bin-id pool))
-    (bin-step (get bin-step pool))
-    (initial-price (get initial-price pool))
-    (bin-price (unwrap-panic (contract-call?
+  (let ((pool (unwrap-panic (contract-call?
+    'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15
+    get-pool))))
+    (unwrap-panic (contract-call?
       'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
-      get-bin-price initial-price bin-step active-bin-id)))
-  )
-    bin-price))
+      get-bin-price (get initial-price pool) (get bin-step pool) (get active-bin-id pool)))))
 
 ;; ============================================================================
 ;; Admin
