@@ -354,15 +354,14 @@
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
-
-    (try! (stx-transfer? amount current-contract caller))
+    (try! (as-contract? ((with-stx amount))
+      (try! (stx-transfer? amount current-contract caller))))
     (map-delete stx-deposits { cycle: cycle, depositor: caller })
     (var-set bumped-stx-principal caller)
     (map-set stx-depositor-list cycle (filter not-eq-bumped-stx (get-stx-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-stx: (- (get total-stx totals) amount) }))
-
-    (print { event: "cancel-stx", depositor: caller, amount: amount, cycle: cycle })
+    (print { event: "refund-stx", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
 (define-public (cancel-sbtc-deposit)
@@ -374,16 +373,15 @@
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
-
-    (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-      transfer amount current-contract caller none))
+    (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
+      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+        transfer amount current-contract caller none))))
     (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
     (var-set bumped-sbtc-principal caller)
     (map-set sbtc-depositor-list cycle (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
-
-    (print { event: "cancel-sbtc", depositor: caller, amount: amount, cycle: cycle })
+    (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
 ;; ============================================================================
