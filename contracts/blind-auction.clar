@@ -234,13 +234,11 @@
     (cycle (var-get settle-cycle))
     (amount (get-stx-deposit cycle depositor))
     (next-cycle (+ cycle u1))
-    (existing-next (get-stx-deposit next-cycle depositor))
   )
     (if (is-eq amount u0) true
       (begin
         (map-delete stx-deposits { cycle: cycle, depositor: depositor })
-        (map-set stx-deposits { cycle: next-cycle, depositor: depositor }
-          (+ existing-next amount))
+        (map-set stx-deposits { cycle: next-cycle, depositor: depositor } amount)
         true))))
 
 (define-private (roll-sbtc-depositor (depositor principal))
@@ -248,13 +246,11 @@
     (cycle (var-get settle-cycle))
     (amount (get-sbtc-deposit cycle depositor))
     (next-cycle (+ cycle u1))
-    (existing-next (get-sbtc-deposit next-cycle depositor))
   )
     (if (is-eq amount u0) true
       (begin
         (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
-        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor }
-          (+ existing-next amount))
+        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
         true))))
 
 ;; Merge depositor lists from old cycle into next cycle
@@ -678,7 +674,6 @@
     (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit sbtc-after-fee) total-stx) u0))
     (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx stx-cleared)) total-stx) u0))
     (next-cycle (+ cycle u1))
-    (existing-next (get-stx-deposit next-cycle depositor))
   )
     (if (is-eq my-deposit u0) true
       (begin
@@ -694,15 +689,12 @@
         (if (> my-stx-unfilled u0)
           (begin
             (map-set stx-deposits
-              { cycle: next-cycle, depositor: depositor }
-              (+ existing-next my-stx-unfilled))
-            (if (is-eq existing-next u0)
-              (let ((next-list (get-stx-depositors next-cycle)))
-                (if (< (len next-list) MAX_DEPOSITORS)
-                  (map-set stx-depositor-list next-cycle
-                    (unwrap-panic (as-max-len? (append next-list depositor) u50)))
-                  true))
-              true))
+              { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
+            (let ((next-list (get-stx-depositors next-cycle)))
+              (if (< (len next-list) MAX_DEPOSITORS)
+                (map-set stx-depositor-list next-cycle
+                  (unwrap-panic (as-max-len? (append next-list depositor) u50)))
+                true)))
           true)
 
         (print {
@@ -726,7 +718,6 @@
     (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit stx-after-fee) total-sbtc) u0))
     (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc sbtc-cleared)) total-sbtc) u0))
     (next-cycle (+ cycle u1))
-    (existing-next (get-sbtc-deposit next-cycle depositor))
   )
     (if (is-eq my-deposit u0) true
       (begin
@@ -741,15 +732,12 @@
         (if (> my-sbtc-unfilled u0)
           (begin
             (map-set sbtc-deposits
-              { cycle: next-cycle, depositor: depositor }
-              (+ existing-next my-sbtc-unfilled))
-            (if (is-eq existing-next u0)
-              (let ((next-list (get-sbtc-depositors next-cycle)))
-                (if (< (len next-list) MAX_DEPOSITORS)
-                  (map-set sbtc-depositor-list next-cycle
-                    (unwrap-panic (as-max-len? (append next-list depositor) u50)))
-                  true))
-              true))
+              { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
+            (let ((next-list (get-sbtc-depositors next-cycle)))
+              (if (< (len next-list) MAX_DEPOSITORS)
+                (map-set sbtc-depositor-list next-cycle
+                  (unwrap-panic (as-max-len? (append next-list depositor) u50)))
+                true)))
           true)
 
         (print {
