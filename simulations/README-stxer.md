@@ -94,9 +94,94 @@ After settlement, unfilled deposits roll into the next cycle automatically.
 
 Rollover math: 100,000 sats deposited - 53,333 sats cleared = 46,667 sats unfilled → rolled to cycle 1.
 
-## Latest simulation
+## Simulation 2: Priority queue bumping (`simul-priority-queue.js`)
 
-https://stxer.xyz/simulations/mainnet/7ed4cc293651815ed7ded9ebf09cc2ca
+Tests the priority queue with `MAX_DEPOSITORS=5` (patched at runtime). Fills queue, then attempts to add a 6th depositor.
+
+```bash
+npx tsx simulations/simul-priority-queue.js
+```
+
+https://stxer.xyz/simulations/mainnet/ef432e857cc5192e770ed3516e9bdc17
+
+### Queue fill + bumping (steps 18-34)
+
+| Step | Action | Result |
+|------|--------|--------|
+| 18-21 | 4 depositors deposit 2 STX each | `(ok u2000000)` |
+| 22 | 5th deposits 1 STX (smallest) | `(ok u1000000)` — queue full |
+| 23-27 | 5 sBTC deposits (4×2000 + 1×1000 sats) | queue full |
+| 28-29 | Queue length STX/sBTC | `u5` / `u5` |
+| 30 | Totals | `{ total-stx: u9000000, total-sbtc: u9000 }` |
+| 31 | **6th STX: 0.5 STX (too small)** | `(err u1001)` ERR_DEPOSIT_TOO_SMALL |
+| 32 | **6th STX: 3 STX (bigger)** | `(ok u3000000)` — bumps `3JSC` (1 STX refunded) |
+| 33 | **6th sBTC: 500 sats (too small)** | `(err u1001)` |
+| 34 | **6th sBTC: 3000 sats (bigger)** | `(ok u3000)` — bumps `3JSC` (1000 sats refunded) |
+
+### Post-bump verification (steps 35-41)
+
+| Step | Query | Result |
+|------|-------|--------|
+| 35-36 | Queue length STX/sBTC | `u5` / `u5` (still 5 — replaced, not added) |
+| 37 | Bumped depositor `3JSC` STX | `u0` (gone) |
+| 38 | New depositor `3BM` STX | `u3000000` (3 STX) |
+| 39 | Bumped depositor `3JSC` sBTC | `u0` (gone) |
+| 40 | New depositor `3F` sBTC | `u3000` (3000 sats) |
+| 41 | Updated totals | `{ total-stx: u11000000, total-sbtc: u11000 }` |
+
+Totals after bump: 4×2 + 3 = 11 STX, 4×2000 + 3000 = 11,000 sats.
+
+### Settlement with 5 depositors per side (steps 42-43)
+
+Oracle price: `u28189016033372` (~281,890 STX/BTC)
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| binding-side | `"stx"` | All 11 STX consumed |
+| stx-cleared | `11,000,000` | 11 STX matched |
+| sbtc-cleared | `3,902` | 11 STX / 281,890 = 3,902 sats |
+| sbtc-unfilled | `7,098` | Rolled to cycle 1 |
+| stx-fee | `11,000` | 0.011 STX → treasury |
+| sbtc-fee | `3` | 3 sats → treasury |
+
+### Pro-rata distributions (step 43 events)
+
+| Depositor | Deposit | Received | Rolled |
+|-----------|---------|----------|--------|
+| 4 STX depositors (2 STX each) | 2,000,000 uSTX | 708 sats sBTC each | 0 |
+| 1 STX depositor (3 STX) | 3,000,000 uSTX | 1,063 sats sBTC | 0 |
+| 4 sBTC depositors (2000 sats each) | 2,000 sats | 1,998,000 uSTX each | 1,290 sats each |
+| 1 sBTC depositor (3000 sats) | 3,000 sats | 2,997,000 uSTX | 1,935 sats |
+
+### Cycle 1 rollover (steps 44-48)
+
+| Step | Query | Result |
+|------|-------|--------|
+| 44 | Settlement record | price u28189016033372, cleared/fees as above |
+| 45 | Current cycle | `u1` |
+| 46 | Cycle 1 totals | `{ total-sbtc: u7098, total-stx: u0 }` |
+| 47 | STX depositors cycle 1 | `(list )` — empty |
+| 48 | sBTC depositors cycle 1 | 5 addresses (unfilled portions rolled) |
+
+Rollover: 11,000 - 3,902 = 7,098 sats unfilled → rolled to cycle 1.
+
+## Simulation 3: Cancel flows (`simul-cancel-flows.js`)
+
+Tests cancel-deposit during deposit phase, cancel during settle phase (should fail), and cancel-cycle rollforward.
+
+```bash
+npx tsx simulations/simul-cancel-flows.js
+```
+
+https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a
+
+## Latest simulations
+
+| Test | Link |
+|------|------|
+| Full lifecycle | https://stxer.xyz/simulations/mainnet/7ed4cc293651815ed7ded9ebf09cc2ca |
+| Priority queue bumping | https://stxer.xyz/simulations/mainnet/ef432e857cc5192e770ed3516e9bdc17 |
+| Cancel flows | https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a |
 
 ## Bugs found and fixed via stxer
 
