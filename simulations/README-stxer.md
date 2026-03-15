@@ -235,6 +235,86 @@ https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a
 
 All cancel flows behave correctly: succeed during deposit phase, fail during settle phase, and rolled deposits are cancellable in the new cycle after cancel-cycle.
 
+## Simulation 4: settle-with-refresh (`simul-settle-refresh.js`)
+
+Tests the production settlement path with live Pyth VAAs fetched from the Hermes API. Uses **real `MAX_STALENESS u60`** — proves that stored prices fail the staleness check and fresh VAAs pass it.
+
+```bash
+npx tsx simulations/simul-settle-refresh.js
+```
+
+https://stxer.xyz/simulations/mainnet/517812a247e579112459da110d9df64d
+
+### Live Pyth prices fetched
+
+| Feed | Price |
+|------|-------|
+| BTC/USD | $72,490.98 |
+| STX/USD | $0.2569 |
+
+### Steps
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Deploy (zeroed blocks, **real MAX_STALENESS u60**) | Success |
+| 2 | Deposit 100 STX | `(ok u100000000)` |
+| 3 | Deposit 100k sats | `(ok u100000)` |
+| 4 | Close deposits | `(ok true)` |
+| 5 | Read phase | `u2` (SETTLE) |
+| 6 | **`settle` (stored prices)** | **`(err u1005)` ERR_STALE_PRICE** — stored Pyth prices too old |
+| 7 | **`settle-with-refresh` (fresh VAA)** | **`(ok true)`** — fresh prices pass the 60s gate |
+| 8 | Settlement record | see below |
+| 9 | Current cycle | `u1` |
+| 10 | Phase | `u0` (DEPOSIT) |
+| 11 | Cycle 1 totals | `{ total-sbtc: u64563, total-stx: u0 }` |
+| 12 | DEX price | `u28076191615152` |
+
+### Pyth price update events (step 7)
+
+The VAA updated both feeds on-chain before settlement:
+
+| Feed | Price (raw) | Confidence | Publish time |
+|------|-------------|------------|-------------|
+| BTC/USD | `7249098000549` ($72,490.98) | `2348583184` | `1773614960` |
+| STX/USD | `25688811` ($0.2569) | `40887` | `1773614960` |
+
+Note: the ~2 uSTX Pyth fee is visible in step 7 event [2] (2 STX transfer to Pyth).
+
+### Settlement details
+
+Oracle price: `u28218892655440` (~282,188 STX/BTC) — derived from fresh Pyth prices.
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| binding-side | `"stx"` | All 100 STX consumed |
+| stx-cleared | `100,000,000` | 100 STX matched |
+| sbtc-cleared | `35,437` | 100 STX / 282,188 = 35,437 sats |
+| sbtc-unfilled | `64,563` | Rolled to cycle 1 |
+| stx-fee | `100,000` | 0.1 STX → treasury |
+| sbtc-fee | `35` | 35 sats → treasury |
+
+### Distributions
+
+| Depositor | Received | Rolled |
+|-----------|----------|--------|
+| STX depositor (100 STX) | **35,402 sats sBTC** | 0 STX |
+| sBTC depositor (100k sats) | **99,900,000 uSTX** (99.9 STX) | 64,563 sats to cycle 1 |
+
+### Price comparison
+
+| Source | Raw | STX/BTC | Notes |
+|--------|-----|---------|-------|
+| Pyth (fresh VAA) | `u28218892655440` | 282,188 | Settlement price |
+| BitFlow DEX | `u28076191615152` | 280,761 | Sanity check |
+| Divergence | | | **0.51%** (within 10% gate) |
+
+### Key takeaway
+
+This proves the full production flow:
+1. `settle` fails with `ERR_STALE_PRICE` when stored Pyth prices are >60s old
+2. Bot fetches fresh VAA from `hermes.pyth.network`
+3. `settle-with-refresh` updates on-chain prices and settles in one tx (~2 uSTX fee)
+
 ## Latest simulations
 
 | Test | Link |
@@ -242,6 +322,7 @@ All cancel flows behave correctly: succeed during deposit phase, fail during set
 | Full lifecycle | https://stxer.xyz/simulations/mainnet/7ed4cc293651815ed7ded9ebf09cc2ca |
 | Priority queue bumping | https://stxer.xyz/simulations/mainnet/ef432e857cc5192e770ed3516e9bdc17 |
 | Cancel flows | https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a |
+| settle-with-refresh | https://stxer.xyz/simulations/mainnet/517812a247e579112459da110d9df64d |
 
 ## Bugs found and fixed via stxer
 
