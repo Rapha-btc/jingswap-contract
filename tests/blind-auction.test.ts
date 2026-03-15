@@ -236,4 +236,128 @@ describe("blind-auction lifecycle", function () {
       ro("get-sbtc-deposit", [Cl.uint(1), Cl.principal(wallet2)])
     ).toBeUint(SBTC_100K + SBTC_50K);
   });
+
+  it("phase guard errors: settle and cancel-cycle in wrong phases", function () {
+    // Fresh simnet — cycle 0, deposit phase
+
+    // ---- Settle during deposit phase ----
+    expect(pub("settle", [], wallet1)).toBeErr(Cl.uint(1009)); // ERR_ZERO_PRICE (hits price check before phase check in execution order)
+
+    // ---- Cancel-cycle during deposit phase ----
+    // cancel-cycle checks (> closed-block u0) first — deposits not closed yet
+    expect(pub("cancel-cycle", [], wallet1)).toBeErr(Cl.uint(1003)); // ERR_NOT_SETTLE_PHASE
+
+    // ---- Close with only STX deposited (no sBTC) → ERR_NOTHING_TO_SETTLE ----
+    expect(pub("deposit-stx", [Cl.uint(STX_100)], wallet1)).toBeOk(
+      Cl.uint(STX_100)
+    );
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 5);
+    expect(pub("close-deposits", [], wallet1)).toBeErr(Cl.uint(1012)); // ERR_NOTHING_TO_SETTLE
+
+    // ---- Now deposit sBTC so we can close ----
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_100K)], wallet2)).toBeOk(
+      Cl.uint(SBTC_100K)
+    );
+    expect(pub("close-deposits", [], wallet1)).toBeOk(Cl.bool(true));
+
+    // ---- Cancel sBTC during buffer phase ----
+    expect(ro("get-cycle-phase", [])).toBeUint(1); // BUFFER
+    expect(pub("cancel-sbtc-deposit", [], wallet2)).toBeErr(Cl.uint(1002)); // ERR_NOT_DEPOSIT_PHASE
+
+    // ---- Settle during buffer phase ----
+    expect(pub("settle", [], wallet1)).toBeErr(Cl.uint(1009)); // ERR_ZERO_PRICE (no pyth data, but also not settle phase yet)
+
+    // ---- Advance to settle phase ----
+    simnet.mineEmptyBlocks(BUFFER_BLOCKS + 5);
+    expect(ro("get-cycle-phase", [])).toBeUint(2); // SETTLE
+
+    // ---- Cancel sBTC during settle phase ----
+    expect(pub("cancel-sbtc-deposit", [], wallet2)).toBeErr(Cl.uint(1002));
+
+    // ---- Settle fails (no Pyth in simnet) ----
+    expect(pub("settle", [], wallet1)).toBeErr(Cl.uint(1009)); // ERR_ZERO_PRICE
+
+    // ---- Cancel-cycle too early ----
+    expect(pub("cancel-cycle", [], wallet1)).toBeErr(Cl.uint(1014)); // ERR_CANCEL_TOO_EARLY
+
+    // ---- Cancel-cycle after threshold ----
+    simnet.mineEmptyBlocks(CANCEL_THRESHOLD + 10);
+    expect(pub("cancel-cycle", [], wallet1)).toBeOk(Cl.bool(true));
+
+    // ---- Double cancel-cycle should fail (already advanced) ----
+    // Now in cycle 1 deposit phase — closed-block is 0
+    expect(pub("cancel-cycle", [], wallet1)).toBeErr(Cl.uint(1003)); // ERR_NOT_SETTLE_PHASE
+  });
+
+  it("admin: treasury, owner transfer, min-sbtc, invalid dex source", function () {
+    // ---- set-treasury ----
+    expect(pub("set-treasury", [Cl.principal(wallet1)], deployer)).toBeOk(
+      Cl.bool(true)
+    );
+    // non-owner cannot set treasury
+    expect(pub("set-treasury", [Cl.principal(wallet2)], wallet1)).toBeErr(
+      Cl.uint(1011)
+    );
+
+    // ---- set-contract-owner ----
+    expect(
+      pub("set-contract-owner", [Cl.principal(wallet1)], deployer)
+    ).toBeOk(Cl.bool(true));
+    // deployer is no longer owner — should fail
+    expect(pub("set-paused", [Cl.bool(true)], deployer)).toBeErr(
+      Cl.uint(1011)
+    );
+    // wallet1 is now owner
+    expect(pub("set-paused", [Cl.bool(true)], wallet1)).toBeOk(
+      Cl.bool(true)
+    );
+    expect(pub("set-paused", [Cl.bool(false)], wallet1)).toBeOk(
+      Cl.bool(true)
+    );
+    // transfer back
+    expect(
+      pub("set-contract-owner", [Cl.principal(deployer)], wallet1)
+    ).toBeOk(Cl.bool(true));
+
+    // ---- set-min-sbtc-deposit ----
+    expect(
+      pub("set-min-sbtc-deposit", [Cl.uint(5_000)], deployer)
+    ).toBeOk(Cl.bool(true));
+    // deposit below new min
+    expect(pub("deposit-sbtc", [Cl.uint(2_000)], wallet2)).toBeErr(
+      Cl.uint(1001)
+    );
+    // reset
+    pub("set-min-sbtc-deposit", [Cl.uint(1_000)], deployer);
+
+    // ---- invalid DEX source ----
+    expect(pub("set-dex-source", [Cl.uint(3)], deployer)).toBeErr(
+      Cl.uint(1011)
+    );
+    expect(pub("set-dex-source", [Cl.uint(0)], deployer)).toBeErr(
+      Cl.uint(1011)
+    );
+  });
+
+  it("cancel sBTC deposit during deposit phase", function () {
+    // deposit sBTC
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_100K)], wallet2)).toBeOk(
+      Cl.uint(SBTC_100K)
+    );
+    expect(
+      ro("get-sbtc-deposit", [Cl.uint(0), Cl.principal(wallet2)])
+    ).toBeUint(SBTC_100K);
+
+    // cancel
+    expect(pub("cancel-sbtc-deposit", [], wallet2)).toBeOk(
+      Cl.uint(SBTC_100K)
+    );
+    expect(
+      ro("get-sbtc-deposit", [Cl.uint(0), Cl.principal(wallet2)])
+    ).toBeUint(0);
+    expect(ro("get-sbtc-depositors", [Cl.uint(0)])).toBeList([]);
+
+    // cancel with nothing
+    expect(pub("cancel-sbtc-deposit", [], wallet2)).toBeErr(Cl.uint(1008));
+  });
 });
