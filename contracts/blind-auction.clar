@@ -615,7 +615,7 @@
       sbtc-received: my-sbtc-received,
       stx-rolled: my-stx-unfilled
     })
-    true))
+    (ok true)))
 
 ;; Send STX to sBTC depositor, roll unfilled sBTC to next cycle
 (define-private (distribute-to-sbtc-depositor (depositor principal))
@@ -647,7 +647,7 @@
       stx-received: my-stx-received,
       sbtc-rolled: my-sbtc-unfilled
     })
-    true))
+    (ok true)))
 
 ;; ============================================================================
 ;; Read-only: DEX price
