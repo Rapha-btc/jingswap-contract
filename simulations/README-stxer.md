@@ -75,13 +75,28 @@ Oracle price: `u28112756693774` (~281,127 STX/BTC)
 | STX depositor (150 STX) | **53,303 sats sBTC** | 0 STX |
 | sBTC depositor (100k sats) | **149,850,000 uSTX** (149.85 STX) | 46,644 sats to cycle 1 |
 
-### Sanity check
+### Sanity checks
 
-150 STX at 281,127 STX/BTC = 0.000533 BTC = 53,356 sats. Matches Bitflow quote (~0.00053 BTC for 150 STX).
+- 150 STX at 281,248 STX/BTC = 0.000533 BTC = 53,333 sats. Matches Bitflow quote (~0.00053 BTC for 150 STX).
+- **Oracle vs DEX price gate**: oracle `u28124867124657` (~281,248) vs DEX `u28076152809216` (~280,761) = **0.17% divergence**, well within the 10% safety gate.
+
+## Cycle 1 rollover verification (steps 21-25)
+
+After settlement, unfilled deposits roll into the next cycle automatically.
+
+| Step | Query | Result | Correct? |
+|------|-------|--------|----------|
+| 21 | `(get-cycle-totals u1)` | `{ total-sbtc: u46667, total-stx: u0 }` | STX fully consumed, unfilled sBTC rolled |
+| 22 | `(get-sbtc-deposit u1 'SP2C7...)` | `u46667` | sBTC depositor's unfilled balance carried over |
+| 23 | `(get-stx-deposit u1 'SPZSQ...)` | `u0` | STX depositor fully filled, nothing rolled |
+| 24 | `(get-stx-depositors u1)` | `(list )` | Empty — no STX deposits in cycle 1 |
+| 25 | `(get-sbtc-depositors u1)` | `(list SP2C7...)` | Only the unfilled sBTC depositor remains |
+
+Rollover math: 100,000 sats deposited - 53,333 sats cleared = 46,667 sats unfilled → rolled to cycle 1.
 
 ## Latest simulation
 
-https://stxer.xyz/simulations/mainnet/d41860818deb47134e8648a286229aba
+https://stxer.xyz/simulations/mainnet/7ed4cc293651815ed7ded9ebf09cc2ca
 
 ## Bugs found and fixed via stxer
 

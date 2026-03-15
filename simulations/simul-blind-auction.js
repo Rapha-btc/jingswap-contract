@@ -154,6 +154,21 @@ async function main() {
     // ============================================================
     .addEvalCode(CONTRACT_ID, "(get-dex-price)")
 
+    // ============================================================
+    // STEP 12: Verify cycle 1 rollover state
+    // ============================================================
+    .addEvalCode(CONTRACT_ID, "(get-cycle-totals u1)")
+    .addEvalCode(
+      CONTRACT_ID,
+      `(get-sbtc-deposit u1 '${SBTC_DEPOSITOR_1})`
+    )
+    .addEvalCode(
+      CONTRACT_ID,
+      `(get-stx-deposit u1 '${STX_DEPOSITOR_1})`
+    )
+    .addEvalCode(CONTRACT_ID, "(get-stx-depositors u1)")
+    .addEvalCode(CONTRACT_ID, "(get-sbtc-depositors u1)")
+
     .run();
 
   console.log(`\nSimulation submitted!`);
