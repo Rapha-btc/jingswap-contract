@@ -7,6 +7,10 @@ const wallet1 = accounts.get("wallet_1")!;
 const wallet2 = accounts.get("wallet_2")!;
 const wallet3 = accounts.get("wallet_3")!;
 const wallet4 = accounts.get("wallet_4")!;
+const wallet5 = accounts.get("wallet_5")!;
+const wallet6 = accounts.get("wallet_6")!;
+const wallet7 = accounts.get("wallet_7")!;
+const wallet8 = accounts.get("wallet_8")!;
 
 const contract = "blind-auction";
 
@@ -359,5 +363,98 @@ describe("blind-auction lifecycle", function () {
 
     // cancel with nothing
     expect(pub("cancel-sbtc-deposit", [], wallet2)).toBeErr(Cl.uint(1008));
+  });
+
+  it("priority queue: fill 5 slots, bump smallest, fail if too small", function () {
+    const STX_2 = 2_000_000; // 2 STX
+    const STX_1 = 1_000_000; // 1 STX (smallest — will be bumped)
+    const STX_3 = 3_000_000; // 3 STX (bumper)
+
+    const SBTC_2K = 2_000;
+    const SBTC_1K = 1_000; // smallest
+    const SBTC_3K = 3_000; // bumper
+
+    // ---- Fill STX queue: 4 x 2 STX + 1 x 1 STX ----
+    expect(pub("deposit-stx", [Cl.uint(STX_2)], wallet1)).toBeOk(Cl.uint(STX_2));
+    expect(pub("deposit-stx", [Cl.uint(STX_2)], wallet2)).toBeOk(Cl.uint(STX_2));
+    expect(pub("deposit-stx", [Cl.uint(STX_2)], wallet3)).toBeOk(Cl.uint(STX_2));
+    expect(pub("deposit-stx", [Cl.uint(STX_2)], wallet4)).toBeOk(Cl.uint(STX_2));
+    expect(pub("deposit-stx", [Cl.uint(STX_1)], wallet5)).toBeOk(Cl.uint(STX_1)); // smallest
+
+    // verify queue full
+    expect(ro("get-stx-depositors", [Cl.uint(0)])).toBeList([
+      Cl.principal(wallet1),
+      Cl.principal(wallet2),
+      Cl.principal(wallet3),
+      Cl.principal(wallet4),
+      Cl.principal(wallet5),
+    ]);
+
+    // ---- 6th depositor too small → ERR_QUEUE_FULL ----
+    expect(pub("deposit-stx", [Cl.uint(STX_1)], wallet6)).toBeErr(
+      Cl.uint(1013) // ERR_QUEUE_FULL (equal to smallest, not greater)
+    );
+
+    // ---- 6th depositor below min → ERR_DEPOSIT_TOO_SMALL ----
+    expect(pub("deposit-stx", [Cl.uint(500_000)], wallet6)).toBeErr(
+      Cl.uint(1001)
+    );
+
+    // ---- 6th depositor bigger → bumps wallet5 (smallest) ----
+    expect(pub("deposit-stx", [Cl.uint(STX_3)], wallet6)).toBeOk(Cl.uint(STX_3));
+
+    // wallet5 is gone, wallet6 is in
+    expect(
+      ro("get-stx-deposit", [Cl.uint(0), Cl.principal(wallet5)])
+    ).toBeUint(0);
+    expect(
+      ro("get-stx-deposit", [Cl.uint(0), Cl.principal(wallet6)])
+    ).toBeUint(STX_3);
+
+    // still 5 depositors
+    expect(ro("get-stx-depositors", [Cl.uint(0)])).toBeList([
+      Cl.principal(wallet1),
+      Cl.principal(wallet2),
+      Cl.principal(wallet3),
+      Cl.principal(wallet4),
+      Cl.principal(wallet6),
+    ]);
+
+    // totals updated: was 4×2+1=9, now 4×2+3=11
+    expect(ro("get-cycle-totals", [Cl.uint(0)])).toBeTuple({
+      "total-stx": Cl.uint(4 * STX_2 + STX_3),
+      "total-sbtc": Cl.uint(0),
+    });
+
+    // ---- Same for sBTC side ----
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_2K)], wallet1)).toBeOk(Cl.uint(SBTC_2K));
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_2K)], wallet2)).toBeOk(Cl.uint(SBTC_2K));
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_2K)], wallet3)).toBeOk(Cl.uint(SBTC_2K));
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_2K)], wallet4)).toBeOk(Cl.uint(SBTC_2K));
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_1K)], wallet5)).toBeOk(Cl.uint(SBTC_1K)); // smallest
+
+    // 6th too small
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_1K)], wallet6)).toBeErr(
+      Cl.uint(1013)
+    );
+
+    // 6th bigger → bumps wallet5
+    expect(pub("deposit-sbtc", [Cl.uint(SBTC_3K)], wallet7)).toBeOk(Cl.uint(SBTC_3K));
+
+    expect(
+      ro("get-sbtc-deposit", [Cl.uint(0), Cl.principal(wallet5)])
+    ).toBeUint(0);
+    expect(
+      ro("get-sbtc-deposit", [Cl.uint(0), Cl.principal(wallet7)])
+    ).toBeUint(SBTC_3K);
+
+    // still 5 depositors
+    expect(ro("get-sbtc-depositors", [Cl.uint(0)])).toBeList([
+      Cl.principal(wallet1),
+      Cl.principal(wallet2),
+      Cl.principal(wallet3),
+      Cl.principal(wallet4),
+      Cl.principal(wallet7),
+    ]);
   });
 });

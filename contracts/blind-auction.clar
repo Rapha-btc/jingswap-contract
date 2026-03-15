@@ -34,8 +34,8 @@
 (define-constant PHASE_BUFFER u1)
 (define-constant PHASE_SETTLE u2)
 
-;; Max depositors per side per cycle
-(define-constant MAX_DEPOSITORS u50)
+;; Max depositors per side per cycle (u50 for mainnet)
+(define-constant MAX_DEPOSITORS u5)
 
 ;; Fee: 10 bps (0.10%) taken from BOTH sides
 (define-constant FEE_BPS u10)
