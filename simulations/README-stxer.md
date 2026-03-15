@@ -55,9 +55,22 @@ Staleness is relaxed because stored Pyth prices on mainnet may be minutes old.
 | 19 | Read cycle phase | `u0` (DEPOSIT — new cycle) |
 | 20 | Read DEX price | `u28076075197505` (~280,760 STX/BTC) |
 
+## Price comparison: Pyth oracle vs BitFlow DEX
+
+The contract settles at the **Pyth price** and uses BitFlow only as a sanity check (must be within 10%).
+
+Raw values side by side:
+
+| Simulation | Pyth Oracle (raw) | BitFlow DEX (raw) | Pyth (STX/BTC) | BitFlow (STX/BTC) | Divergence |
+|------------|-------------------|-------------------|----------------|-------------------|------------|
+| Lifecycle | `u28124867124657` | `u28076152809216` | 281,248 | 280,761 | 0.17% |
+| Priority queue | `u28189016033372` | `u28076075197505` | 281,890 | 280,760 | 0.40% |
+
+Both values use `PRICE_PRECISION` (1e8). Divide by 1e8 to get STX/BTC.
+
 ## Settlement details (step 16)
 
-Oracle price: `u28112756693774` (~281,127 STX/BTC)
+Oracle price: `u28124867124657` (~281,248 STX/BTC)
 
 | Field | Value | Meaning |
 |-------|-------|---------|
@@ -167,13 +180,60 @@ Rollover: 11,000 - 3,902 = 7,098 sats unfilled → rolled to cycle 1.
 
 ## Simulation 3: Cancel flows (`simul-cancel-flows.js`)
 
-Tests cancel-deposit during deposit phase, cancel during settle phase (should fail), and cancel-cycle rollforward.
+Tests cancel-deposit during deposit phase, cancel during settle phase (should fail), and cancel-cycle rollforward with cancellation in the new cycle.
 
 ```bash
 npx tsx simulations/simul-cancel-flows.js
 ```
 
 https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a
+
+### Part A: Cancel during deposit phase (steps 2-10)
+
+| Step | Action | Result |
+|------|--------|--------|
+| 2 | Deposit 100 STX | `(ok u100000000)` |
+| 3 | Deposit 100k sats sBTC | `(ok u100000)` |
+| 4 | Read totals | `{ total-stx: u100000000, total-sbtc: u100000 }` |
+| 5 | **Cancel STX deposit** | `(ok u100000000)` — 100 STX refunded |
+| 6 | **Cancel sBTC deposit** | `(ok u100000)` — 100k sats refunded |
+| 7 | Read totals after cancel | `{ total-stx: u0, total-sbtc: u0 }` |
+| 8-9 | Read depositor lists | `(list )` / `(list )` — both empty |
+| 10 | **Cancel again (nothing)** | `(err u1008)` ERR_NOTHING_TO_WITHDRAW |
+
+### Part B: Cancel during settle phase (steps 11-17)
+
+| Step | Action | Result |
+|------|--------|--------|
+| 11 | Re-deposit 100 STX | `(ok u100000000)` |
+| 12 | Re-deposit 100k sats | `(ok u100000)` |
+| 13 | STX_USER_2 deposit 50 STX | `(err u1)` — insufficient STX on mainnet |
+| 14 | Close deposits | `(ok true)` |
+| 15 | Read phase | `u2` (SETTLE) |
+| 16 | **Cancel STX during settle** | `(err u1002)` ERR_NOT_DEPOSIT_PHASE |
+| 17 | **Cancel sBTC during settle** | `(err u1002)` ERR_NOT_DEPOSIT_PHASE |
+
+### Part C: Cancel-cycle + rollforward (steps 18-33)
+
+| Step | Action | Result |
+|------|--------|--------|
+| 18 | Read totals before cancel-cycle | `{ total-stx: u100000000, total-sbtc: u100000 }` |
+| 19 | **Cancel-cycle** | `(ok true)` — rolls all deposits to cycle 1 |
+| 20 | Current cycle | `u1` |
+| 21 | Phase | `u0` (DEPOSIT — new cycle) |
+| 22 | Cycle 1 totals | `{ total-stx: u100000000, total-sbtc: u100000 }` — fully rolled |
+| 23 | STX deposit in cycle 1 | `u100000000` (100 STX rolled) |
+| 24 | STX_USER_2 in cycle 1 | `u0` (their deposit failed originally) |
+| 25 | sBTC deposit in cycle 1 | `u100000` (100k sats rolled) |
+| 26 | STX depositors cycle 1 | `(list SPZSQ...)` |
+| 27 | sBTC depositors cycle 1 | `(list SP2C7...)` |
+| 28 | Cycle 0 totals | `{ total-stx: u0, total-sbtc: u0 }` — wiped clean |
+| 29 | **Cancel rolled STX in new cycle** | `(ok u100000000)` — 100 STX refunded |
+| 30 | **Cancel rolled sBTC in new cycle** | `(ok u100000)` — 100k sats refunded |
+| 31 | Cycle 1 totals after cancels | `{ total-stx: u0, total-sbtc: u0 }` |
+| 32-33 | Depositor lists | `(list )` / `(list )` — all empty |
+
+All cancel flows behave correctly: succeed during deposit phase, fail during settle phase, and rolled deposits are cancellable in the new cycle after cancel-cycle.
 
 ## Latest simulations
 
