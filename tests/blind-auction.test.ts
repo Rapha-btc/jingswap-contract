@@ -53,7 +53,7 @@ describe("blind-auction lifecycle", function () {
     // ---- Deposits ----
     // wallet_1: 100 STX
     expect(pub("deposit-stx", [Cl.uint(STX_100)], wallet1)).toBeOk(
-      Cl.uint(0)
+      Cl.uint(STX_100)
     );
     expect(
       ro("get-stx-deposit", [Cl.uint(0), Cl.principal(wallet1)])
@@ -72,7 +72,7 @@ describe("blind-auction lifecycle", function () {
 
     // wallet_1 top-up: +50 STX
     expect(pub("deposit-stx", [Cl.uint(STX_50)], wallet1)).toBeOk(
-      Cl.uint(0)
+      Cl.uint(STX_50)
     );
     expect(
       ro("get-stx-deposit", [Cl.uint(0), Cl.principal(wallet1)])
@@ -84,7 +84,7 @@ describe("blind-auction lifecycle", function () {
 
     // wallet_3: 200 STX (second depositor)
     expect(pub("deposit-stx", [Cl.uint(STX_200)], wallet3)).toBeOk(
-      Cl.uint(0)
+      Cl.uint(STX_200)
     );
     expect(ro("get-stx-depositors", [Cl.uint(0)])).toBeList([
       Cl.principal(wallet1),
@@ -116,7 +116,7 @@ describe("blind-auction lifecycle", function () {
 
     // re-deposit
     expect(pub("deposit-stx", [Cl.uint(STX_200)], wallet3)).toBeOk(
-      Cl.uint(0)
+      Cl.uint(STX_200)
     );
 
     // ---- Admin ----
@@ -139,7 +139,7 @@ describe("blind-auction lifecycle", function () {
     );
     // deposit works again
     expect(pub("deposit-stx", [Cl.uint(STX_50)], wallet1)).toBeOk(
-      Cl.uint(0)
+      Cl.uint(STX_50)
     );
 
     // owner can change min deposits

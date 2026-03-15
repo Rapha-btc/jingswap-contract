@@ -44,6 +44,10 @@
 ;; Precision for price math (8 decimals, matches Pyth expo -8)
 (define-constant PRICE_PRECISION u100000000)
 
+;; Decimal adjustment: sBTC has 8 decimals (sats), STX has 6 decimals (uSTX)
+;; Factor = 10^8 / 10^6 = 100
+(define-constant DECIMAL_FACTOR u100)
+
 ;; Pyth price feed IDs
 ;; Source: https://pyth.network/developers/price-feed-ids#stacks-mainnet
 (define-constant BTC_USD_FEED 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43)
@@ -511,10 +515,10 @@
     (stx-price (to-uint (get price stx-feed)))
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
     (dex-price (get-dex-price))
-    (stx-value-of-sbtc (/ (* total-sbtc oracle-price) PRICE_PRECISION))
+    (stx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
     (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
     (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
-    (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx PRICE_PRECISION) oracle-price)))
+    (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
     (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
     (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
     (stx-unfilled (- total-stx stx-clearing))

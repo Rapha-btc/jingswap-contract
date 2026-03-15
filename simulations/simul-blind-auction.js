@@ -29,25 +29,11 @@ const SBTC_100K = 100_000; // 0.001 BTC
 const SBTC_50K = 50_000; // 0.0005 BTC
 
 async function main() {
-  // Read contract source and patch block thresholds for single-block simulation
-  let source = fs.readFileSync("./contracts/blind-auction.clar", "utf8");
-  source = source
-    .replace(
-      "(define-constant DEPOSIT_MIN_BLOCKS u150)",
-      "(define-constant DEPOSIT_MIN_BLOCKS u0)"
-    )
-    .replace(
-      "(define-constant BUFFER_BLOCKS u30)",
-      "(define-constant BUFFER_BLOCKS u0)"
-    )
-    .replace(
-      "(define-constant CANCEL_THRESHOLD u500)",
-      "(define-constant CANCEL_THRESHOLD u0)"
-    )
-    .replace(
-      "(define-constant MAX_STALENESS u60)",
-      "(define-constant MAX_STALENESS u9999999999)"
-    );
+  // Read stxer variant with zeroed block thresholds + relaxed staleness
+  const source = fs.readFileSync(
+    "./contracts/blind-auction-stxer.clar",
+    "utf8"
+  );
 
   console.log("=== BLIND AUCTION - FULL LIFECYCLE STXER SIMULATION ===\n");
   console.log("Scenario:");
