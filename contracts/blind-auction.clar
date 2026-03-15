@@ -597,8 +597,8 @@
     (map-delete stx-deposits { cycle: cycle, depositor: depositor })
     (if (> my-sbtc-received u0)
       (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
-        (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-          transfer my-sbtc-received current-contract depositor none)))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer my-sbtc-received current-contract depositor none))))
       true)
     (if (> my-stx-unfilled u0)
       (begin
@@ -628,24 +628,18 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
-
     (if (> my-stx-received u0)
-      (match (stx-transfer? my-stx-received current-contract depositor)
-        success true
-        error true)
+      (try! (as-contract? ((with-stx my-stx-received))
+        (try! (stx-transfer? my-stx-received current-contract depositor))))
       true)
-
     (if (> my-sbtc-unfilled u0)
       (begin
         (map-set sbtc-deposits
           { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
-        (let ((next-list (get-sbtc-depositors next-cycle)))
-          (if (< (len next-list) MAX_DEPOSITORS)
-            (map-set sbtc-depositor-list next-cycle
-              (unwrap-panic (as-max-len? (append next-list depositor) u50)))
-            true)))
+        (map-set sbtc-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+        true)
       true)
-
     (print {
       event: "distribute-sbtc-depositor",
       depositor: depositor,
