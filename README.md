@@ -26,7 +26,7 @@ SETTLE (open-ended until success)
   |
   settle() succeeds --> next cycle starts, deposit phase open
   |
-  500+ blocks without settlement? --> anyone calls cancel-cycle()
+  500+ blocks after close + buffer? --> anyone calls cancel-cycle()
   |                                   deposits roll to next cycle
   v                                   users can withdraw next deposit phase
 ```
@@ -35,7 +35,7 @@ SETTLE (open-ended until success)
 2. **Close deposits** — Anyone can call after 150 blocks. No more deposits or cancellations accepted.
 3. **Buffer** — 30 blocks (~60 seconds). No actions allowed. This is a security feature: any Pyth price that was visible during the deposit phase becomes stale (>60s old) by the time settlement opens. This prevents depositors from gaming a known settlement price. The buffer duration matches `MAX_STALENESS` so the settler MUST push a fresh price.
 4. **Settle** — Anyone calls `settle()`. Reads Pyth spot price, validates 3 safety gates, computes pro-rata fills, sends tokens directly to all depositors. Unfilled auto-rolls to next cycle.
-5. **Cancel** — If settlement keeps failing (500+ blocks from cycle start), anyone can cancel. All deposits roll to next cycle. Users can individually withdraw during the next deposit phase.
+5. **Cancel** — If settlement keeps failing (500+ blocks after close + buffer), anyone can cancel. All deposits roll to next cycle. Users can individually withdraw during the next deposit phase.
 
 ### Anti-Gaming Properties
 
@@ -46,6 +46,7 @@ SETTLE (open-ended until success)
 | Oracle manipulation | Pyth confidence check + DEX sanity check |
 | Stale prices | Pyth publish-time < 60s old |
 | Dust spam | Admin-adjustable minimum deposits + priority queue bumping |
+| Malicious owner pause | `cancel-cycle` and `cancel-*-deposit` bypass pause — funds can never be trapped |
 
 ### Fair Information Symmetry
 
@@ -82,7 +83,7 @@ buffer (30 blocks)            stale prices expire, no actions
   --> (automatic)
 settle phase (open-ended)
   --> settle() succeeds       anyone, advance cycle, deposit phase starts
-  --> cancel-cycle()          anyone after 500 blocks, roll deposits, advance cycle
+  --> cancel-cycle()          anyone after 500 blocks from close + buffer, roll deposits, advance cycle
 ```
 
 ### Settlement Flow
