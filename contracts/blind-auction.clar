@@ -594,36 +594,28 @@
     (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx (var-get settle-stx-cleared))) total-stx) u0))
     (next-cycle (+ cycle u1))
   )
-    (if (is-eq my-deposit u0) true
+    (map-delete stx-deposits { cycle: cycle, depositor: depositor })
+    (if (> my-sbtc-received u0)
+      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
+        (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer my-sbtc-received current-contract depositor none)))
+      true)
+    (if (> my-stx-unfilled u0)
       (begin
-        (map-delete stx-deposits { cycle: cycle, depositor: depositor })
-
-        (if (> my-sbtc-received u0)
-          (match (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-            transfer my-sbtc-received current-contract depositor none)
-            success true
-            error true)
-          true)
-
-        (if (> my-stx-unfilled u0)
-          (begin
-            (map-set stx-deposits
-              { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
-            (let ((next-list (get-stx-depositors next-cycle)))
-              (if (< (len next-list) MAX_DEPOSITORS)
-                (map-set stx-depositor-list next-cycle
-                  (unwrap-panic (as-max-len? (append next-list depositor) u50)))
-                true)))
-          true)
-
-        (print {
-          event: "distribute-stx-depositor",
-          depositor: depositor,
-          cycle: cycle,
-          sbtc-received: my-sbtc-received,
-          stx-rolled: my-stx-unfilled
-        })
-        true))))
+        (map-set stx-deposits
+          { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
+        (map-set stx-depositor-list next-cycle
+              (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
+        true)
+      true)
+    (print {
+      event: "distribute-stx-depositor",
+      depositor: depositor,
+      cycle: cycle,
+      sbtc-received: my-sbtc-received,
+      stx-rolled: my-stx-unfilled
+    })
+    true))
 
 ;; Send STX to sBTC depositor, roll unfilled sBTC to next cycle
 (define-private (distribute-to-sbtc-depositor (depositor principal))
@@ -635,35 +627,33 @@
     (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc (var-get settle-sbtc-cleared))) total-sbtc) u0))
     (next-cycle (+ cycle u1))
   )
-    (if (is-eq my-deposit u0) true
+    (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+
+    (if (> my-stx-received u0)
+      (match (stx-transfer? my-stx-received current-contract depositor)
+        success true
+        error true)
+      true)
+
+    (if (> my-sbtc-unfilled u0)
       (begin
-        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+        (map-set sbtc-deposits
+          { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
+        (let ((next-list (get-sbtc-depositors next-cycle)))
+          (if (< (len next-list) MAX_DEPOSITORS)
+            (map-set sbtc-depositor-list next-cycle
+              (unwrap-panic (as-max-len? (append next-list depositor) u50)))
+            true)))
+      true)
 
-        (if (> my-stx-received u0)
-          (match (stx-transfer? my-stx-received current-contract depositor)
-            success true
-            error true)
-          true)
-
-        (if (> my-sbtc-unfilled u0)
-          (begin
-            (map-set sbtc-deposits
-              { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
-            (let ((next-list (get-sbtc-depositors next-cycle)))
-              (if (< (len next-list) MAX_DEPOSITORS)
-                (map-set sbtc-depositor-list next-cycle
-                  (unwrap-panic (as-max-len? (append next-list depositor) u50)))
-                true)))
-          true)
-
-        (print {
-          event: "distribute-sbtc-depositor",
-          depositor: depositor,
-          cycle: cycle,
-          stx-received: my-stx-received,
-          sbtc-rolled: my-sbtc-unfilled
-        })
-        true))))
+    (print {
+      event: "distribute-sbtc-depositor",
+      depositor: depositor,
+      cycle: cycle,
+      stx-received: my-stx-received,
+      sbtc-rolled: my-sbtc-unfilled
+    })
+    true))
 
 ;; ============================================================================
 ;; Read-only: DEX price
