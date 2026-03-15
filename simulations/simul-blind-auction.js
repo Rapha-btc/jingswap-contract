@@ -1,41 +1,67 @@
 // simul-blind-auction.js
-// Stxer mainnet fork simulation: blind-auction deposit + read-only tests
+// Stxer mainnet fork simulation: full blind-auction lifecycle
+// Uses a modified contract with zeroed block thresholds since stxer is single-block.
+//
 // Run: npx tsx simulations/simul-blind-auction.js
 import fs from "node:fs";
 import {
   ClarityVersion,
   uintCV,
   principalCV,
+  noneCV,
+  boolCV,
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 
 // --- Mainnet addresses ---
-// Deployer: will deploy the blind-auction contract
 const DEPLOYER = "SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22";
-// STX depositor: ~18k STX on mainnet
-const STX_DEPOSITOR = "SPZSQNQF9SM88N00K4XYV05ZAZRACC748T78P5P3";
-// sBTC depositor: ~40.5 BTC on mainnet
-const SBTC_DEPOSITOR = "SP2C7BCAP2NH3EYWCCVHJ6K0DMZBXDFKQ56KR7QN2";
+// STX whale: ~18k STX
+const STX_DEPOSITOR_1 = "SPZSQNQF9SM88N00K4XYV05ZAZRACC748T78P5P3";
+// sBTC whale: ~40.5 BTC
+const SBTC_DEPOSITOR_1 = "SP2C7BCAP2NH3EYWCCVHJ6K0DMZBXDFKQ56KR7QN2";
 
 const CONTRACT_ID = `${DEPLOYER}.blind-auction`;
 
+// Amounts
+const STX_100 = 100_000_000; // 100 STX
+const STX_50 = 50_000_000; // 50 STX
+const SBTC_100K = 100_000; // 0.001 BTC
+const SBTC_50K = 50_000; // 0.0005 BTC
+
 async function main() {
-  const source = fs.readFileSync("./contracts/blind-auction.clar", "utf8");
+  // Read contract source and patch block thresholds for single-block simulation
+  let source = fs.readFileSync("./contracts/blind-auction.clar", "utf8");
+  source = source
+    .replace(
+      "(define-constant DEPOSIT_MIN_BLOCKS u150)",
+      "(define-constant DEPOSIT_MIN_BLOCKS u0)"
+    )
+    .replace(
+      "(define-constant BUFFER_BLOCKS u30)",
+      "(define-constant BUFFER_BLOCKS u0)"
+    )
+    .replace(
+      "(define-constant CANCEL_THRESHOLD u500)",
+      "(define-constant CANCEL_THRESHOLD u0)"
+    )
+    .replace(
+      "(define-constant MAX_STALENESS u60)",
+      "(define-constant MAX_STALENESS u9999999999)"
+    );
 
-  console.log("=== BLIND AUCTION - STXER MAINNET FORK SIMULATION ===\n");
+  console.log("=== BLIND AUCTION - FULL LIFECYCLE STXER SIMULATION ===\n");
   console.log("Scenario:");
-  console.log("1. Deploy blind-auction contract");
-  console.log("2. STX depositor deposits 100 STX");
-  console.log("3. sBTC depositor deposits 100,000 sats (0.001 BTC)");
-  console.log("4. Read cycle state, depositor lists, totals");
-  console.log("5. STX depositor deposits 50 more STX (top-up)");
-  console.log("6. Read updated state");
-  console.log("7. Cancel STX deposit (partial flow test)");
+  console.log("1.  Deploy blind-auction (zeroed block thresholds)");
+  console.log("2.  STX depositor deposits 100 STX");
+  console.log("3.  sBTC depositor deposits 100k sats");
+  console.log("4.  Read cycle state");
+  console.log("5.  STX depositor top-up +50 STX");
+  console.log("6.  Close deposits");
+  console.log("7.  Settle using stored Pyth prices");
+  console.log("8.  Read settlement results");
+  console.log("9.  Verify cycle advanced to 1");
+  console.log("10. Read final balances");
   console.log("");
-
-  const STX_DEPOSIT_1 = 100_000_000; // 100 STX
-  const STX_DEPOSIT_2 = 50_000_000; // 50 STX
-  const SBTC_DEPOSIT = 100_000; // 0.001 BTC = 100k sats
 
   const sessionId = await SimulationBuilder.new()
     // ============================================================
@@ -51,64 +77,96 @@ async function main() {
     // ============================================================
     // STEP 2: STX depositor deposits 100 STX
     // ============================================================
-    .withSender(STX_DEPOSITOR)
+    .withSender(STX_DEPOSITOR_1)
     .addContractCall({
       contract_id: CONTRACT_ID,
       function_name: "deposit-stx",
-      function_args: [uintCV(STX_DEPOSIT_1)],
+      function_args: [uintCV(STX_100)],
     })
 
     // ============================================================
     // STEP 3: sBTC depositor deposits 100k sats
     // ============================================================
-    .withSender(SBTC_DEPOSITOR)
+    .withSender(SBTC_DEPOSITOR_1)
     .addContractCall({
       contract_id: CONTRACT_ID,
       function_name: "deposit-sbtc",
-      function_args: [uintCV(SBTC_DEPOSIT)],
+      function_args: [uintCV(SBTC_100K)],
     })
 
     // ============================================================
-    // STEP 4: Read cycle state
+    // STEP 4: Read cycle state after deposits
     // ============================================================
     .addEvalCode(CONTRACT_ID, "(get-current-cycle)")
     .addEvalCode(CONTRACT_ID, "(get-cycle-phase)")
     .addEvalCode(CONTRACT_ID, "(get-cycle-totals u0)")
+    .addEvalCode(
+      CONTRACT_ID,
+      `(get-stx-deposit u0 '${STX_DEPOSITOR_1})`
+    )
+    .addEvalCode(
+      CONTRACT_ID,
+      `(get-sbtc-deposit u0 '${SBTC_DEPOSITOR_1})`
+    )
     .addEvalCode(CONTRACT_ID, "(get-stx-depositors u0)")
     .addEvalCode(CONTRACT_ID, "(get-sbtc-depositors u0)")
-    .addEvalCode(
-      CONTRACT_ID,
-      `(get-stx-deposit u0 '${STX_DEPOSITOR})`
-    )
-    .addEvalCode(
-      CONTRACT_ID,
-      `(get-sbtc-deposit u0 '${SBTC_DEPOSITOR})`
-    )
 
     // ============================================================
-    // STEP 5: STX depositor top-up (adds 50 more STX)
+    // STEP 5: STX depositor top-up +50 STX
     // ============================================================
-    .withSender(STX_DEPOSITOR)
+    .withSender(STX_DEPOSITOR_1)
     .addContractCall({
       contract_id: CONTRACT_ID,
       function_name: "deposit-stx",
-      function_args: [uintCV(STX_DEPOSIT_2)],
+      function_args: [uintCV(STX_50)],
     })
 
     // ============================================================
-    // STEP 6: Read updated totals + deposit
+    // STEP 6: Read updated deposit
     // ============================================================
-    .addEvalCode(CONTRACT_ID, "(get-cycle-totals u0)")
     .addEvalCode(
       CONTRACT_ID,
-      `(get-stx-deposit u0 '${STX_DEPOSITOR})`
+      `(get-stx-deposit u0 '${STX_DEPOSITOR_1})`
     )
+    .addEvalCode(CONTRACT_ID, "(get-cycle-totals u0)")
 
     // ============================================================
-    // STEP 7: Read DEX price + min deposits
+    // STEP 7: Close deposits (DEPOSIT_MIN_BLOCKS = 0, so immediate)
+    // ============================================================
+    .withSender(STX_DEPOSITOR_1)
+    .addContractCall({
+      contract_id: CONTRACT_ID,
+      function_name: "close-deposits",
+      function_args: [],
+    })
+
+    // ============================================================
+    // STEP 8: Read phase (should be SETTLE since BUFFER_BLOCKS = 0)
+    // ============================================================
+    .addEvalCode(CONTRACT_ID, "(get-cycle-phase)")
+
+    // ============================================================
+    // STEP 9: Settle using stored Pyth prices
+    // MAX_STALENESS raised to accept stored mainnet prices
+    // ============================================================
+    .withSender(STX_DEPOSITOR_1)
+    .addContractCall({
+      contract_id: CONTRACT_ID,
+      function_name: "settle",
+      function_args: [],
+    })
+
+    // ============================================================
+    // STEP 10: Read settlement results
+    // ============================================================
+    .addEvalCode(CONTRACT_ID, "(get-settlement u0)")
+    .addEvalCode(CONTRACT_ID, "(get-current-cycle)")
+    .addEvalCode(CONTRACT_ID, "(get-cycle-phase)")
+
+    // ============================================================
+    // STEP 11: Read DEX price (sanity check)
     // ============================================================
     .addEvalCode(CONTRACT_ID, "(get-dex-price)")
-    .addEvalCode(CONTRACT_ID, "(get-min-deposits)")
 
     .run();
 

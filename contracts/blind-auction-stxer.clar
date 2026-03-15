@@ -1,3 +1,5 @@
+;; remove delays for stxer simulation in 1 block
+
 ;; title: blind-auction
 ;; version: 0.8.0
 ;; summary: Blind batch auction for sBTC/STX swaps at synthetic oracle price
@@ -22,12 +24,12 @@
 ;; ============================================================================
 
 ;; Cycle phase thresholds (in blocks, ~2s each)
-(define-constant DEPOSIT_MIN_BLOCKS u150) ;; min 150 blocks before deposits can be closed (~5 min)
+(define-constant DEPOSIT_MIN_BLOCKS u0) ;; min 150 blocks before deposits can be closed (~5 min)
 ;; Buffer must be >= MAX_STALENESS worth of blocks so that any price
 ;; visible during deposit phase is guaranteed stale by settle time.
 ;; This prevents depositors from gaming a known settlement price.
-(define-constant BUFFER_BLOCKS u30)       ;; 30 blocks (~60s) >= MAX_STALENESS (60s)
-(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks after closed + buffer = anyone can cancel (~16 min)
+(define-constant BUFFER_BLOCKS u0)       ;; 30 blocks (~60s) >= MAX_STALENESS (60s)
+(define-constant CANCEL_THRESHOLD u0)   ;; 500 blocks after closed + buffer = anyone can cancel (~16 min)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
