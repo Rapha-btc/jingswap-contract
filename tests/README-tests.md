@@ -10,9 +10,9 @@ npm test
 
 The blind-auction contract is tested at two levels:
 
-1. **Clarinet unit tests** (`tests/blind-auction.test.ts`) — run locally via vitest + clarinet-sdk simnet. These test every public function, every error path, every phase transition, and the priority queue. The only thing simnet cannot test is actual settlement (requires Pyth oracle data and BitFlow pool state).
+1. **Clarinet unit tests** (`tests/blind-auction.test.ts`) — run locally via vitest + clarinet-sdk simnet with mainnet contract requirements loaded. Tests every public function, every error path, every phase transition, and the priority queue. Pyth prices can be seeded via `set-price-testnet` (simnet is not mainnet so the testnet gate passes). Settlement is the one flow that also requires the BitFlow XYK pool to have non-zero balances — the pool's `update-pool-balances` is gated by `xyk-core-v-1-2` (contract-caller check), which cannot be called directly from simnet test accounts.
 
-2. **Stxer mainnet fork simulations** (`simulations/`) — run against a real mainnet fork with live Pyth prices, real sBTC balances, and real BitFlow pools. These prove the settlement math, pro-rata distributions, fee calculations, and price oracle integration all work with real-world data.
+2. **Stxer mainnet fork simulations** (`simulations/`) — run against a real mainnet fork with live Pyth prices, real sBTC balances, and real BitFlow pools. These prove the settlement math, pro-rata distributions, fee calculations, DEX sanity gate, and price oracle integration all work with real-world data. Settlement with both `settle` (stored prices) and `settle-with-refresh` (fresh Pyth VAAs) is fully tested here.
 
 Together, there is no untested public function or error path.
 
@@ -94,14 +94,16 @@ Tests every function in the wrong phase.
 
 ## What clarinet cannot test (covered by stxer)
 
+Simnet loads all mainnet requirements (Pyth, BitFlow, sBTC) and Pyth prices can be seeded via `set-price-testnet`. The one blocker for settlement in simnet is the BitFlow XYK pool: its balances default to zero and `update-pool-balances` is gated by `contract-caller = xyk-core-v-1-2`, which simnet test accounts cannot impersonate.
+
 | Feature | Why simnet can't test | Stxer simulation |
 |---------|----------------------|-----------------|
-| Settlement math | No Pyth oracle data in simnet | `simul-blind-auction.js` — settles with real prices, verifies pro-rata distributions |
-| `settle-with-refresh` | Needs Wormhole-signed VAAs | `simul-settle-refresh.js` — fetches live Pyth VAA, proves stored prices fail (u1005) and fresh VAA succeeds |
-| Fee calculations | Requires settlement | Verified: 10 bps from both sides, sent to treasury |
-| DEX sanity gate | Needs real BitFlow pool state | Oracle vs DEX divergence verified (~0.2%) |
+| Settlement math | BitFlow pool has zero balances → `get-xyk-price` divides by zero | `simul-blind-auction.js` — settles with real prices, verifies pro-rata distributions |
+| `settle-with-refresh` | Needs Wormhole-signed VAAs for fresh prices | `simul-settle-refresh.js` — fetches live Pyth VAA, proves stored prices fail (u1005) and fresh VAA succeeds |
+| Fee calculations | Requires successful settlement | Verified: 10 bps from both sides, sent to treasury |
+| DEX sanity gate | Pool balances needed for price calculation | Oracle vs DEX divergence verified (~0.2%) |
 | Rollover after settlement | Requires settlement to produce unfilled amounts | Unfilled deposits correctly roll to next cycle with accurate amounts |
-| Priority queue at scale | Only 8 wallets in simnet | `simul-priority-queue.js` tests with real mainnet addresses |
+| Priority queue at scale | Only 8 wallets in simnet (queue=5 for testing) | `simul-priority-queue.js` tests with real mainnet addresses |
 
 ## Error code reference
 
