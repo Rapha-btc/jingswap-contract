@@ -457,4 +457,9 @@ describe("blind-auction lifecycle", function () {
       Cl.principal(wallet7),
     ]);
   });
+
+  // NOTE: Full settlement test requires remote_data (mainnet pool state)
+  // but remote_data breaks sBTC transfers with "Clarity VM failed to track token supply".
+  // Settlement is fully tested via stxer mainnet fork simulations instead.
+  // See simulations/README-stxer.md for settlement results.
 });
