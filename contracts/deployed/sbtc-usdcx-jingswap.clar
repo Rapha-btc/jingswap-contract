@@ -200,7 +200,7 @@
             (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
                     transfer smallest-amount current-contract smallest-who none))))
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-          transfer amount tx-sender (as-contract tx-sender) none))
+                    transfer amount tx-sender current-contract none))
         (var-set bumped-usdcx-principal smallest-who)
         (map-set usdcx-depositor-list cycle
           (unwrap-panic (as-max-len? (append (filter not-eq-bumped-usdcx depositors) tx-sender) u50)))
@@ -213,7 +213,7 @@
         (ok amount))
       (begin
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-          transfer amount tx-sender (as-contract tx-sender) none))
+          transfer amount tx-sender current-contract none))
         (map-set usdcx-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
         (map-set cycle-totals cycle
           (merge totals { total-usdcx: (+ (get total-usdcx totals) amount) }))
@@ -242,10 +242,11 @@
         (smallest-who (get smallest-principal smallest-info))
       )
         (asserts! (> amount smallest-amount) ERR_QUEUE_FULL)
-        (try! (as-contract (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-          transfer smallest-amount tx-sender smallest-who none)))
+        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" smallest-amount))
+            (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+                    transfer smallest-amount current-contract smallest-who none))))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-          transfer amount tx-sender (as-contract tx-sender) none))
+          transfer amount tx-sender current-contract none))
         (var-set bumped-sbtc-principal smallest-who)
         (map-set sbtc-depositor-list cycle
           (unwrap-panic (as-max-len? (append (filter not-eq-bumped-sbtc depositors) tx-sender) u50)))
@@ -258,7 +259,7 @@
         (ok amount))
       (begin
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-          transfer amount tx-sender (as-contract tx-sender) none))
+          transfer amount tx-sender current-contract none))
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
@@ -268,6 +269,7 @@
           true)
         (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
         (ok amount)))))
+
 (define-public (cancel-usdcx-deposit)
   (let (
     (cycle (var-get current-cycle))
@@ -277,8 +279,9 @@
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
-    (try! (as-contract (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-      transfer amount tx-sender caller none)))
+    (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" amount))
+        (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+                    transfer amount current-contract caller none))))
     (map-delete usdcx-deposits { cycle: cycle, depositor: caller })
     (var-set bumped-usdcx-principal caller)
     (map-set usdcx-depositor-list cycle (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
@@ -296,8 +299,9 @@
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (> amount u0) ERR_NOTHING_TO_WITHDRAW)
-    (try! (as-contract (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-      transfer amount tx-sender caller none)))
+    (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
+      (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+        transfer amount current-contract caller none))))
     (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
     (var-set bumped-sbtc-principal caller)
     (map-set sbtc-depositor-list cycle (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
@@ -452,12 +456,14 @@
         settled-at: stacks-block-height })
 
     (if (> usdcx-fee u0)
-      (try! (as-contract (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-        transfer usdcx-fee tx-sender (var-get treasury) none)))
+      (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" usdcx-fee))
+        (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+              transfer usdcx-fee current-contract (var-get treasury) none)))
       true)
     (if (> sbtc-fee u0)
-      (try! (as-contract (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer sbtc-fee tx-sender (var-get treasury) none)))
+      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sbtc-fee))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+         transfer sbtc-fee current-contract (var-get treasury) none))))
       true)
 
     (map-set cycle-totals (+ cycle u1)
@@ -494,8 +500,9 @@
   )
     (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
     (if (> my-sbtc-received u0)
-      (try! (as-contract (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-        transfer my-sbtc-received tx-sender depositor none)))
+      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer my-sbtc-received current-contract depositor none))))
       true)
     (if (> my-usdcx-unfilled u0)
       (begin
@@ -525,8 +532,9 @@
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
     (if (> my-usdcx-received u0)
-      (try! (as-contract (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-        transfer my-usdcx-received tx-sender depositor none)))
+      (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" my-usdcx-received))
+        (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+                transfer my-usdcx-received current-contract depositor none))))
       true)
     (if (> my-sbtc-unfilled u0)
       (begin
@@ -547,10 +555,10 @@
 
 (define-read-only (get-dex-price (stx-price uint))
   (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
-    (/ (* (get-xyk-btc-stx-price) stx-price) PRICE_PRECISION)
+    (/ (* (get-xyk-price) stx-price) PRICE_PRECISION)
     (get-dlmm-price)))
 
-(define-read-only (get-xyk-btc-stx-price)
+(define-read-only (get-xyk-price)
   (let ((pool (unwrap-panic (contract-call?
     'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
     get-pool))))

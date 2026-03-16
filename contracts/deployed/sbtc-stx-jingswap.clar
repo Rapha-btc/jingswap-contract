@@ -266,6 +266,7 @@
           true)
         (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
         (ok amount)))))
+
 (define-public (cancel-stx-deposit)
   (let (
     (cycle (var-get current-cycle))
@@ -320,6 +321,7 @@
              closed-at-block: stacks-block-height,
              elapsed-blocks: elapsed })
     (ok true)))
+
 (define-public (settle)
   (let (
     (btc-feed (unwrap! (contract-call?
@@ -335,6 +337,7 @@
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
     (advance-cycle)
     (ok true)))
+
 (define-public (settle-with-refresh
   (btc-vaa (buff 8192))
   (stx-vaa (buff 8192))
@@ -368,6 +371,7 @@
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
       (advance-cycle)
       (ok true))))
+      
 (define-public (cancel-cycle)
   (let (
     (cycle (var-get current-cycle))
@@ -472,6 +476,7 @@
       binding-side: (if sbtc-is-binding "sbtc" "stx")
     })
     (ok true)))
+
 (define-private (distribute-to-stx-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
@@ -503,6 +508,7 @@
       stx-rolled: my-stx-unfilled
     })
     (ok true)))
+    
 (define-private (distribute-to-sbtc-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
