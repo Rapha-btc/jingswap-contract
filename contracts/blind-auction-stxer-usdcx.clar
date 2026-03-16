@@ -4,15 +4,14 @@
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
 
-(define-constant DEPOSIT_MIN_BLOCKS u150)
-(define-constant BUFFER_BLOCKS u30)
-(define-constant CANCEL_THRESHOLD u500)
+(define-constant DEPOSIT_MIN_BLOCKS u0)
+(define-constant BUFFER_BLOCKS u0)
+(define-constant CANCEL_THRESHOLD u0)
 
 (define-constant PHASE_DEPOSIT u0)
 (define-constant PHASE_BUFFER u1)
 (define-constant PHASE_SETTLE u2)
-
-(define-constant MAX_DEPOSITORS u50)
+(define-constant MAX_DEPOSITORS u5)
 (define-constant FEE_BPS u10)
 (define-constant BPS_PRECISION u10000)
 (define-constant PRICE_PRECISION u100000000)
@@ -21,10 +20,9 @@
 
 (define-constant BTC_USD_FEED 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43)
 (define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
-(define-constant MAX_STALENESS u60)
+(define-constant MAX_STALENESS u999999999)
 (define-constant MAX_CONF_RATIO u50)
 (define-constant MAX_DEX_DEVIATION u10)
-
 (define-constant DEX_SOURCE_XYK u1)
 (define-constant DEX_SOURCE_DLMM u2)
 (define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
