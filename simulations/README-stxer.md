@@ -324,6 +324,67 @@ This proves the full production flow:
 | Cancel flows | https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a |
 | settle-with-refresh | https://stxer.xyz/simulations/mainnet/517812a247e579112459da110d9df64d |
 
+## Simulation 5: Same depositor both sides (`simul-same-depositor.js`)
+
+Tests a single address depositing on both the STX and sBTC sides, then settling. Proves the contract handles the same principal appearing in both depositor lists.
+
+```bash
+npx tsx simulations/simul-same-depositor.js
+```
+
+https://stxer.xyz/simulations/mainnet/7d94200e1aeeb7e6dce1c2bb81cd452f
+
+### Steps
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Deploy | Success |
+| 2 | Fund depositor with 200 STX | STX transfer |
+| 3 | Deposit 100 STX | `(ok u100000000)` |
+| 4 | Deposit 100k sats sBTC | `(ok u100000)` |
+| 5 | Read totals | `{ total-stx: u100000000, total-sbtc: u100000 }` |
+| 6 | Read STX depositors | `(list SP2C7...)` |
+| 7 | Read sBTC depositors | `(list SP2C7...)` — same address on both sides |
+| 8 | Close deposits | `(ok true)` |
+| 9 | **Settle** | `(ok true)` |
+| 10 | Settlement record | see below |
+| 11 | Current cycle | `u1` |
+| 12 | Cycle 1 totals | `{ total-sbtc: u64601, total-stx: u0 }` |
+| 13 | STX deposit cycle 1 | `u0` — fully consumed |
+| 14 | sBTC deposit cycle 1 | `u64601` — unfilled rolled |
+
+### Settlement details (step 9)
+
+Oracle price: `u28249298546088` (~282,492 STX/BTC)
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| binding-side | `"stx"` | 100 STX fully consumed |
+| stx-cleared | `100,000,000` | All 100 STX matched |
+| sbtc-cleared | `35,399` | 35,399 sats matched |
+| sbtc-unfilled | `64,601` | Rolled to cycle 1 |
+| stx-fee | `100,000` | 0.1 STX → treasury |
+| sbtc-fee | `35` | 35 sats → treasury |
+
+### Distributions to same address
+
+| Role | Received | Rolled |
+|------|----------|--------|
+| As STX depositor | **35,364 sats sBTC** | 0 STX |
+| As sBTC depositor | **99,900,000 uSTX** (99.9 STX) | 64,601 sats to cycle 1 |
+
+**Net effect:** The depositor swapped 100 STX for 35,364 sats at oracle price, got 99.9 STX back from the sBTC side, and has 64,601 sats rolled to cycle 1. Treasury collected 0.1 STX + 35 sats in fees. The contract correctly handles a single address on both sides — each side is processed independently through the depositor lists.
+
+## Latest simulations
+
+| Test | Link |
+|------|------|
+| Full lifecycle | https://stxer.xyz/simulations/mainnet/7ed4cc293651815ed7ded9ebf09cc2ca |
+| Priority queue bumping | https://stxer.xyz/simulations/mainnet/ef432e857cc5192e770ed3516e9bdc17 |
+| Cancel flows | https://stxer.xyz/simulations/mainnet/d47cb53217f026b2dde9f7bc8cd8c86a |
+| settle-with-refresh | https://stxer.xyz/simulations/mainnet/517812a247e579112459da110d9df64d |
+| Same depositor both sides | https://stxer.xyz/simulations/mainnet/7d94200e1aeeb7e6dce1c2bb81cd452f |
+
 ## Bugs found and fixed via stxer
 
 1. **Decimal factor missing** — settlement math treated sats (8 decimals) as if STX also had 8 decimals. Result was 100x off. Fixed by adding `DECIMAL_FACTOR u100` (10^8/10^6) to `stx-value-of-sbtc` and `sbtc-clearing` formulas.
