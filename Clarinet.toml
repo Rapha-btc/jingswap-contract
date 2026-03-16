@@ -41,8 +41,12 @@ contract_id = "SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1"
 # caller.
 # More informations: https://www.hiro.so/blog/new-safety-checks-in-clarinet
 
+# remote_data disabled — causes two known bugs:
+# 1. ft-get-supply on forked XYK pool → "VM failed to track token supply"
+# 2. Whale sBTC transfers are flaky (live balance varies)
+# Settlement is tested via stxer simulations instead.
 [repl.remote_data]
-enabled = true
+enabled = false
 api_url = 'https://api.hiro.so'
 
 [repl.analysis]
@@ -53,5 +57,10 @@ check_checker = { trusted_sender = false, trusted_caller = false, callee_filter 
 
 [contracts.blind-auction]
 path = "contracts/blind-auction.clar"
+clarity_version = 4
+epoch = "latest"
+
+[contracts.blind-auction-stxer]
+path = "contracts/blind-auction-stxer.clar"
 clarity_version = 4
 epoch = "latest"

@@ -169,4 +169,9 @@ plan:
       emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
       path: contracts/blind-auction.clar
       clarity-version: 4
+    - transaction-type: emulated-contract-publish
+      contract-name: blind-auction-stxer
+      emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      path: contracts/blind-auction-stxer.clar
+      clarity-version: 4
     epoch: '3.3'
