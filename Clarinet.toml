@@ -41,10 +41,9 @@ contract_id = "SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1"
 # caller.
 # More informations: https://www.hiro.so/blog/new-safety-checks-in-clarinet
 
-# [repl.remote_data]
-# enabled = true
-# api_url = 'https://api.hiro.so'
-# See tests/README-remote-data.md for why this is disabled
+[repl.remote_data]
+enabled = true
+api_url = 'https://api.hiro.so'
 
 [repl.analysis]
 passes = []

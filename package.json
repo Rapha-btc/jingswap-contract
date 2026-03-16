@@ -17,7 +17,7 @@
     "@types/node": "^24.4.0",
     "chokidar-cli": "^3.0.0",
     "stxer": "^0.6.1",
-    "vitest": "^4.0.7",
+    "vitest": "^2.1.9",
     "vitest-environment-clarinet": "^3.0.0"
   }
 }
