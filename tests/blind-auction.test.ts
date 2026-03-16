@@ -458,8 +458,9 @@ describe("blind-auction lifecycle", function () {
     ]);
   });
 
-  // NOTE: Full settlement test requires remote_data (mainnet pool state)
-  // but remote_data breaks sBTC transfers with "Clarity VM failed to track token supply".
-  // Settlement is fully tested via stxer mainnet fork simulations instead.
+  // Settlement test: requires [repl.remote_data] enabled in Clarinet.toml
+  // for BitFlow pool state + Pyth prices. Currently blocked by clarinet VM
+  // "Clarity VM failed to track token supply" when as-contract transfers sBTC.
+  // See tests/README-remote-data.md — settlement is fully tested via stxer.
   // See simulations/README-stxer.md for settlement results.
 });

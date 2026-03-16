@@ -44,9 +44,7 @@ contract_id = "SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1"
 # [repl.remote_data]
 # enabled = true
 # api_url = 'https://api.hiro.so'
-# Note: enables mainnet state for read-only calls (pool balances, Pyth prices)
-# but breaks sBTC transfers with "Clarity VM failed to track token supply"
-# Use stxer for full settlement testing instead
+# See tests/README-remote-data.md for why this is disabled
 
 [repl.analysis]
 passes = []
