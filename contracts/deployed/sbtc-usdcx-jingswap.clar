@@ -457,8 +457,8 @@
 
     (if (> usdcx-fee u0)
       (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" usdcx-fee))
-        (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-              transfer usdcx-fee current-contract (var-get treasury) none)))
+        (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+              transfer usdcx-fee current-contract (var-get treasury) none))))
       true)
     (if (> sbtc-fee u0)
       (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sbtc-fee))
