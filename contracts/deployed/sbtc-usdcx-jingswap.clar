@@ -359,12 +359,14 @@
         pyth-decoder-contract: pyth-decoder,
         wormhole-core-contract: wormhole-core }))
     (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
-      (try! (contract-call?
-        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-        verify-and-update-price-feeds stx-vaa
-        { pyth-storage-contract: pyth-storage,
-          pyth-decoder-contract: pyth-decoder,
-          wormhole-core-contract: wormhole-core }))
+      (begin
+        (try! (contract-call?
+          'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
+          verify-and-update-price-feeds stx-vaa
+          { pyth-storage-contract: pyth-storage,
+            pyth-decoder-contract: pyth-decoder,
+            wormhole-core-contract: wormhole-core }))
+        true)
       true)
     (let (
       (btc-feed (unwrap! (contract-call?
