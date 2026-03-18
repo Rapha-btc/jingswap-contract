@@ -1,4 +1,3 @@
-;; SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-jingswap
 
 (use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
@@ -60,6 +59,9 @@
 (define-data-var settle-stx-after-fee uint u0)
 (define-data-var bumped-stx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
+
+(define-data-var dust-filter-total-stx uint u0)
+(define-data-var dust-filter-total-sbtc uint u0)
 
 (define-map stx-deposits
   { cycle: uint, depositor: principal }
@@ -306,18 +308,74 @@
     (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
+(define-private (filter-dust-stx-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (cycle-totals (get-cycle-totals cycle))
+    (amount (get-stx-deposit cycle depositor))
+    (total-stx (var-get dust-filter-total-stx))
+    (total-sbtc (var-get dust-filter-total-sbtc))
+  )
+    (if (< (* amount (* total-sbtc (- BPS_PRECISION FEE_BPS)))
+                (* total-stx BPS_PRECISION))
+      (begin
+        (try! (as-contract? ((with-stx amount))
+          (try! (stx-transfer? amount current-contract depositor))))
+        (map-delete stx-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-stx-principal depositor)
+        (map-set stx-depositor-list cycle
+          (filter not-eq-bumped-stx (get-stx-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge cycle-totals
+            { total-stx: (- (get total-stx cycle-totals) amount) }))
+        (var-set dust-filter-total-stx (- total-stx amount))
+        (print { event: "dust-refund-stx", depositor: depositor, cycle: cycle, amount: amount})
+        (ok true))
+      (ok true))))
+
+(define-private (filter-dust-sbtc-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (cycle-totals (get-cycle-totals cycle))
+    (amount (get-sbtc-deposit cycle depositor))
+    (total-stx (var-get dust-filter-total-stx))
+    (total-sbtc (var-get dust-filter-total-sbtc))
+  )
+    (if (< (* amount (* total-stx (- BPS_PRECISION FEE_BPS)))
+                (* total-sbtc BPS_PRECISION))
+      (begin
+        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
+          (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+            transfer amount current-contract depositor none))))
+        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-sbtc-principal depositor)
+        (map-set sbtc-depositor-list cycle
+          (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge cycle-totals
+            { total-sbtc: (- (get total-sbtc cycle-totals) amount) }))
+        (var-set dust-filter-total-sbtc (- total-sbtc amount))
+        (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: amount})
+        (ok true))
+      (ok true))))
+
 (define-public (close-deposits)
   (let (
+    (cycle (var-get current-cycle))
     (elapsed (get-blocks-elapsed))
-    (totals (get-cycle-totals (var-get current-cycle)))
+    (totals (get-cycle-totals cycle))
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-stx totals) (var-get min-stx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
+    (var-set dust-filter-total-stx (get total-stx totals))
+    (var-set dust-filter-total-sbtc (get total-sbtc totals))
+    (map filter-dust-stx-depositor (get-stx-depositors cycle))
+    (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
     (var-set deposits-closed-block stacks-block-height)
     (print { event: "close-deposits",
-             cycle: (var-get current-cycle),
+             cycle: cycle,
              closed-at-block: stacks-block-height,
              elapsed-blocks: elapsed })
     (ok true)))
@@ -485,6 +543,7 @@
     (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit (var-get settle-sbtc-after-fee)) total-stx) u0))
     (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx (var-get settle-stx-cleared))) total-stx) u0))
     (next-cycle (+ cycle u1))
+    (min-stx (var-get min-stx-deposit))
   )
     (map-delete stx-deposits { cycle: cycle, depositor: depositor })
     (if (> my-sbtc-received u0)
@@ -493,19 +552,25 @@
           transfer my-sbtc-received current-contract depositor none))))
       true)
     (if (> my-stx-unfilled u0)
-      (begin
-        (map-set stx-deposits
-          { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
-        (map-set stx-depositor-list next-cycle
-              (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
-        true)
+      (if (< my-stx-unfilled min-stx)
+        (begin
+          (try! (as-contract? ((with-stx my-stx-unfilled))
+            (try! (stx-transfer? my-stx-unfilled current-contract depositor))))
+          (print { event: "dust-refund-stx", depositor: depositor, cycle: cycle, amount: my-stx-unfilled })
+          true)
+        (begin
+          (map-set stx-deposits
+            { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
+          (map-set stx-depositor-list next-cycle
+                (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
+          true))
       true)
     (print {
       event: "distribute-stx-depositor",
       depositor: depositor,
       cycle: cycle,
       sbtc-received: my-sbtc-received,
-      stx-rolled: my-stx-unfilled
+      stx-rolled: (if (>= my-stx-unfilled min-stx) my-stx-unfilled u0)
     })
     (ok true)))
     
@@ -517,6 +582,7 @@
     (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit (var-get settle-stx-after-fee)) total-sbtc) u0))
     (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc (var-get settle-sbtc-cleared))) total-sbtc) u0))
     (next-cycle (+ cycle u1))
+    (min-sbtc (var-get min-sbtc-deposit))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
     (if (> my-stx-received u0)
@@ -524,19 +590,26 @@
         (try! (stx-transfer? my-stx-received current-contract depositor))))
       true)
     (if (> my-sbtc-unfilled u0)
-      (begin
-        (map-set sbtc-deposits
-          { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
-        (map-set sbtc-depositor-list next-cycle
-          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
-        true)
+      (if (< my-sbtc-unfilled min-sbtc)
+        (begin
+          (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-unfilled))
+            (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+              transfer my-sbtc-unfilled current-contract depositor none))))
+          (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: my-sbtc-unfilled})
+          true)
+        (begin
+          (map-set sbtc-deposits
+            { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
+          (map-set sbtc-depositor-list next-cycle
+            (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+          true))
       true)
     (print {
       event: "distribute-sbtc-depositor",
       depositor: depositor,
       cycle: cycle,
       stx-received: my-stx-received,
-      sbtc-rolled: my-sbtc-unfilled
+      sbtc-rolled: (if (>= my-sbtc-unfilled min-sbtc) my-sbtc-unfilled u0)
     })
     (ok true)))
 

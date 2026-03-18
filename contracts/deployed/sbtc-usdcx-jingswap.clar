@@ -1,4 +1,3 @@
-;; SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-usdcx-jingswap
 
 (use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
@@ -63,6 +62,9 @@
 (define-data-var settle-usdcx-after-fee uint u0)
 (define-data-var bumped-usdcx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
+
+(define-data-var dust-filter-total-usdcx uint u0)
+(define-data-var dust-filter-total-sbtc uint u0)
 
 (define-map usdcx-deposits
   { cycle: uint, depositor: principal }
@@ -313,18 +315,76 @@
     (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
+(define-private (filter-dust-usdcx-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (cycle-totals (get-cycle-totals cycle))
+    (amount (get-usdcx-deposit cycle depositor))
+    (total-usdcx (var-get dust-filter-total-usdcx))
+    (total-sbtc (var-get dust-filter-total-sbtc))
+  )
+    (if (< (* amount (* total-sbtc (- BPS_PRECISION FEE_BPS)))
+                (* total-usdcx BPS_PRECISION))
+      (begin
+        (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" amount))
+          (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+            transfer amount current-contract depositor none))))
+        (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-usdcx-principal depositor)
+        (map-set usdcx-depositor-list cycle
+          (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge cycle-totals
+            { total-usdcx: (- (get total-usdcx cycle-totals) amount) }))
+        (var-set dust-filter-total-usdcx (- total-usdcx amount))
+        (print { event: "dust-refund-usdcx", depositor: depositor, cycle: cycle, amount: amount})
+        (ok true))
+      (ok true))))
+
+(define-private (filter-dust-sbtc-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (cycle-totals (get-cycle-totals cycle))
+    (amount (get-sbtc-deposit cycle depositor))
+    (total-usdcx (var-get dust-filter-total-usdcx))
+    (total-sbtc (var-get dust-filter-total-sbtc))
+  )
+    (if (< (* amount (* total-usdcx (- BPS_PRECISION FEE_BPS)))
+                (* total-sbtc BPS_PRECISION))
+      (begin
+        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
+          (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+            transfer amount current-contract depositor none))))
+        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-sbtc-principal depositor)
+        (map-set sbtc-depositor-list cycle
+          (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge cycle-totals
+            { total-sbtc: (- (get total-sbtc cycle-totals) amount) }))
+        (var-set dust-filter-total-sbtc (- total-sbtc amount))
+        (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: amount})
+        (ok true))
+      (ok true))))
+
 (define-public (close-deposits)
   (let (
+    (cycle (var-get current-cycle))
     (elapsed (get-blocks-elapsed))
-    (totals (get-cycle-totals (var-get current-cycle)))
+    (totals (get-cycle-totals cycle))
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-usdcx totals) (var-get min-usdcx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
+
+    (var-set dust-filter-total-usdcx (get total-usdcx totals))
+    (var-set dust-filter-total-sbtc (get total-sbtc totals))
+    (map filter-dust-usdcx-depositor (get-usdcx-depositors cycle))
+    (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
     (var-set deposits-closed-block stacks-block-height)
     (print { event: "close-deposits",
-             cycle: (var-get current-cycle),
+             cycle: cycle,
              closed-at-block: stacks-block-height,
              elapsed-blocks: elapsed })
     (ok true)))
@@ -502,6 +562,7 @@
     (my-sbtc-received (if (> total-usdcx u0) (/ (* my-deposit (var-get settle-sbtc-after-fee)) total-usdcx) u0))
     (my-usdcx-unfilled (if (> total-usdcx u0) (/ (* my-deposit (- total-usdcx (var-get settle-usdcx-cleared))) total-usdcx) u0))
     (next-cycle (+ cycle u1))
+    (min-usdcx (var-get min-usdcx-deposit))
   )
     (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
     (if (> my-sbtc-received u0)
@@ -510,19 +571,26 @@
           transfer my-sbtc-received current-contract depositor none))))
       true)
     (if (> my-usdcx-unfilled u0)
-      (begin
-        (map-set usdcx-deposits
-          { cycle: next-cycle, depositor: depositor } my-usdcx-unfilled)
-        (map-set usdcx-depositor-list next-cycle
-              (unwrap-panic (as-max-len? (append (get-usdcx-depositors next-cycle) depositor) u50)))
-        true)
+      (if (< my-usdcx-unfilled min-usdcx)
+        (begin
+          (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" my-usdcx-unfilled))
+            (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+              transfer my-usdcx-unfilled current-contract depositor none))))
+          (print { event: "dust-refund-usdcx", depositor: depositor, cycle: cycle, amount: my-usdcx-unfilled })
+          true)
+        (begin
+          (map-set usdcx-deposits
+            { cycle: next-cycle, depositor: depositor } my-usdcx-unfilled)
+          (map-set usdcx-depositor-list next-cycle
+                (unwrap-panic (as-max-len? (append (get-usdcx-depositors next-cycle) depositor) u50)))
+          true))
       true)
     (print {
       event: "distribute-usdcx-depositor",
       depositor: depositor,
       cycle: cycle,
       sbtc-received: my-sbtc-received,
-      usdcx-rolled: my-usdcx-unfilled
+      usdcx-rolled: (if (>= my-usdcx-unfilled min-usdcx) my-usdcx-unfilled u0)
     })
     (ok true)))
 
@@ -534,6 +602,7 @@
     (my-usdcx-received (if (> total-sbtc u0) (/ (* my-deposit (var-get settle-usdcx-after-fee)) total-sbtc) u0))
     (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc (var-get settle-sbtc-cleared))) total-sbtc) u0))
     (next-cycle (+ cycle u1))
+    (min-sbtc (var-get min-sbtc-deposit))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
     (if (> my-usdcx-received u0)
@@ -542,19 +611,26 @@
                 transfer my-usdcx-received current-contract depositor none))))
       true)
     (if (> my-sbtc-unfilled u0)
-      (begin
-        (map-set sbtc-deposits
-          { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
-        (map-set sbtc-depositor-list next-cycle
-          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
-        true)
+      (if (< my-sbtc-unfilled min-sbtc)
+        (begin
+          (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-unfilled))
+            (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+              transfer my-sbtc-unfilled current-contract depositor none))))
+          (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: my-sbtc-unfilled})
+          true)
+        (begin
+          (map-set sbtc-deposits
+            { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
+          (map-set sbtc-depositor-list next-cycle
+            (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+          true))
       true)
     (print {
       event: "distribute-sbtc-depositor",
       depositor: depositor,
       cycle: cycle,
       usdcx-received: my-usdcx-received,
-      sbtc-rolled: my-sbtc-unfilled
+      sbtc-rolled: (if (>= my-sbtc-unfilled min-sbtc) my-sbtc-unfilled u0)
     })
     (ok true)))
 
