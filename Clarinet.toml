@@ -41,10 +41,10 @@ contract_id = "SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1"
 # caller.
 # More informations: https://www.hiro.so/blog/new-safety-checks-in-clarinet
 
-# remote_data disabled — causes two known bugs:
-# 1. ft-get-supply on forked XYK pool → "VM failed to track token supply"
-# 2. Whale sBTC transfers are flaky (live balance varies)
-# Settlement is tested via stxer simulations instead.
+# remote_data: enable for settlement-remote.test.ts (mainnet fork testing).
+# VM token supply bug is FIXED on clarinet-sdk 3.15.0.
+# Disabled by default - other tests rely on Devnet.toml sbtc_balance which
+# is ignored with remote_data (must use whale funding instead).
 [repl.remote_data]
 enabled = false
 api_url = 'https://api.hiro.so'

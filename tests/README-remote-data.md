@@ -1,81 +1,85 @@
-# remote_data issue — settlement testing blocked
+# remote_data settlement testing
 
-## Goal
+## Status (clarinet-sdk 3.15.0)
 
-Test full settlement in clarinet by enabling `[repl.remote_data]` to load:
-- **BitFlow XYK pool state** (x-balance, y-balance) for DEX sanity check
-- **Pyth stored prices** for oracle price feed
+Full settlement works in clarinet with `remote_data` enabled using `blind-auction-stxer`
+(relaxed timing gates, identical settlement logic).
 
-## What works
+### What works
 
-With `remote_data` enabled in `Clarinet.toml`:
+| Feature | Status |
+|---------|--------|
+| `ft-get-supply` on forked XYK pool LP token | Fixed |
+| `as-contract?` FT transfers of mainnet sBTC | Fixed |
+| Whale funding (impersonated mainnet address) | Works |
+| DEX price from mainnet XYK pool | Works |
+| Stored Pyth prices from mainnet | Works (with relaxed staleness) |
+| Full settlement (deposit -> close -> settle) | Works |
+| Settlement math (clearing, fees, rollover) | Verified |
 
-```toml
-[repl.remote_data]
-enabled = true
-api_url = 'https://api.hiro.so'
+### How to run
+
+```bash
+# Enable remote_data in Clarinet.toml:
+#   [repl.remote_data]
+#   enabled = true
+
+npx vitest run tests/settlement-remote.test.ts
 ```
 
-**Read-only calls to mainnet contracts return real data:**
+### Why `blind-auction-stxer`
 
-```
-BitFlow pool: x-balance = 1,023,892,993 sats (~10.2 BTC), y-balance = 2,889,931,328,878 uSTX (~2.89M STX)
-Pyth BTC/USD: price = 7273725000000 ($72,737)
-Pyth STX/USD: price = 25688811 ($0.2569)
-DEX price via blind-auction get-dex-price: works, returns real mainnet pool price
-```
+The production `blind-auction` contract has three timing gates that require workarounds
+in a clarinet test with remote_data:
 
-## What partially works
+| Gate | Production | Stxer | Why |
+|------|-----------|-------|-----|
+| `DEPOSIT_MIN_BLOCKS` | 150 | 0 | Skip mining 150 blocks |
+| `BUFFER_BLOCKS` | 30 | 0 | Skip buffer phase |
+| `MAX_STALENESS` | 60s | 999999999 | Stored Pyth prices are stale relative to simnet time |
 
-**Funding wallets from mainnet whale works:**
+The settlement logic (price math, clearing, fees, distribution) is **identical**.
+
+### Why not `settle-with-refresh`
+
+The production `settle-with-refresh` path pushes fresh Pyth VAAs via wormhole
+verification. In clarinet with remote_data:
+
+- `set-price-testnet` returns `(err u5003)` — `is-in-mainnet` = true with remote_data
+- Wormhole VAA verification returns `(err u1)` — guardian set state issues
+
+So we use `settle` with relaxed `MAX_STALENESS` instead.
+
+### sBTC funding
+
+With `remote_data`, `sbtc_balance` from `Devnet.toml` is ignored.
+Fund wallets by impersonating a mainnet whale:
 
 ```typescript
+const SBTC_WHALE = "SP2C7BCAP2NH3EYWCCVHJ6K0DMZBXDFKQ56KR7QN2";
 simnet.callPublicFn(SBTC_TOKEN, "transfer",
   [Cl.uint(100_000), Cl.principal(SBTC_WHALE), Cl.principal(wallet1), Cl.none()],
   SBTC_WHALE);
-// → (ok true) ✓
 ```
 
-Devnet `sbtc_balance` from Devnet.toml is ignored — wallets have 0 sBTC. But transferring from a mainnet whale (impersonated via sender) works.
-
-**Depositing sBTC into blind-auction works** after whale funding.
-
-## What breaks
-
-**`as-contract` sBTC transfers inside the contract fail during settlement:**
+### Settlement results (sample run)
 
 ```
-Error: Internal(Expect("ERROR: Clarity VM failed to track token supply."))
+Pyth BTC: $74,673, STX: $0.2682
+Oracle: 278,449 STX per BTC
+DEX:    279,305 STX per BTC (0.3% divergence — within 10% gate)
+
+Settlement:
+  STX cleared:  100,000,000 (100 STX — all matched)
+  sBTC cleared: 35,921 sats (0.00036 BTC)
+  sBTC unfilled: 64,079 sats → rolled to cycle 1
+  Fees: 100,000 uSTX + 35 sats (0.1% each)
 ```
 
-When `settle` calls `distribute-to-stx-depositor` which uses `as-contract` to transfer sBTC from the contract to depositors, the Clarity VM loses track of the sBTC token supply.
+## Previous bug (fixed)
 
-This happens because the VM can track simple wallet→wallet transfers (whale funding), but cannot track supply changes when a **contract** receives sBTC and then sends it via `as-contract`.
-
-**Note:** In pillar (vitest v2 + clarinet-sdk v3.9.0), whale transfers work. The token supply error may be specific to vitest v4's fork pool handling.
-
-## Reproduction
-
-```bash
-# Enable remote_data in Clarinet.toml, then:
-npm test
-# → All sBTC deposit tests fail with (err u1)
+The original issue was `as-contract?` FT transfers throwing:
 ```
-
-## Expected behavior
-
-Either:
-1. `sbtc_balance` from `Devnet.toml` should be honored even with `remote_data` enabled (mint to devnet wallets at genesis)
-2. Transfers from mainnet whale addresses via `simnet.callPublicFn(..., WHALE_ADDRESS)` should work without the "token supply" error
-
-## Current workaround
-
-- `remote_data` is **disabled** — all 9 clarinet tests pass
-- Settlement is tested via **stxer mainnet fork simulations** (4 simulations, all green)
-- See `simulations/README-stxer.md` for full settlement results
-
-## Environment
-
-- clarinet 3.14.0
-- @stacks/clarinet-sdk 3.9.0
-- vitest 4.1.0
+Internal(Expect("ERROR: Clarity VM failed to track token supply."))
+```
+This is **fixed** on clarinet-sdk 3.15.0.
