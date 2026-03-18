@@ -65,6 +65,8 @@
 
 (define-data-var dust-filter-total-usdcx uint u0)
 (define-data-var dust-filter-total-sbtc uint u0)
+(define-data-var dust-filter-sbtc-reward uint u0)
+(define-data-var dust-filter-usdcx-reward uint u0)
 
 (define-map usdcx-deposits
   { cycle: uint, depositor: principal }
@@ -321,10 +323,9 @@
     (ccl-totals (get-cycle-totals cycle))
     (amount (get-usdcx-deposit cycle depositor))
     (total-usdcx (var-get dust-filter-total-usdcx))
-    (total-sbtc (var-get dust-filter-total-sbtc))
+    (sbtc-reward (var-get dust-filter-sbtc-reward))
   )
-    (if (< (* amount (* total-sbtc (- BPS_PRECISION FEE_BPS)))
-                (* total-usdcx BPS_PRECISION))
+    (if (< (* amount sbtc-reward) total-usdcx)
       (begin
         (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" amount))
           (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
@@ -346,11 +347,10 @@
     (cycle (var-get current-cycle))
     (ccl-totals (get-cycle-totals cycle))
     (amount (get-sbtc-deposit cycle depositor))
-    (total-usdcx (var-get dust-filter-total-usdcx))
+    (usdcx-reward (var-get dust-filter-usdcx-reward))
     (total-sbtc (var-get dust-filter-total-sbtc))
   )
-    (if (< (* amount (* total-usdcx (- BPS_PRECISION FEE_BPS)))
-                (* total-sbtc BPS_PRECISION))
+    (if (< (* amount usdcx-reward) total-sbtc)
       (begin
         (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
           (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -367,7 +367,12 @@
         (ok true))
       (ok true))))
 
-(define-public (close-deposits)
+(define-public (close-deposits
+  (btc-vaa (buff 8192))
+  (stx-vaa (buff 8192))
+  (pyth-storage <pyth-storage-trait>)
+  (pyth-decoder <pyth-decoder-trait>)
+  (wormhole-core <wormhole-core-trait>))
   (let (
     (cycle (var-get current-cycle))
     (elapsed (get-blocks-elapsed))
@@ -377,17 +382,40 @@
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-usdcx totals) (var-get min-usdcx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
-
-    (var-set dust-filter-total-usdcx (get total-usdcx totals))
-    (var-set dust-filter-total-sbtc (get total-sbtc totals))
-    (map filter-dust-usdcx-depositor (get-usdcx-depositors cycle))
-    (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
-    (var-set deposits-closed-block stacks-block-height)
-    (print { event: "close-deposits",
-             cycle: cycle,
-             closed-at-block: stacks-block-height,
-             elapsed-blocks: elapsed })
-    (ok true)))
+    (try! (contract-call?
+      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
+      verify-and-update-price-feeds btc-vaa
+      { pyth-storage-contract: pyth-storage,
+        pyth-decoder-contract: pyth-decoder,
+        wormhole-core-contract: wormhole-core }))
+    (let (
+      (total-usdcx (get total-usdcx totals))
+      (total-sbtc (get total-sbtc totals))
+      (btc-feed (unwrap! (contract-call?
+        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
+        get-price BTC_USD_FEED) ERR_ZERO_PRICE))
+      (btc-price (to-uint (get price btc-feed)))
+      (oracle-price btc-price)
+      (usdcx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
+      (sbtc-is-binding (<= usdcx-value-of-sbtc total-usdcx))
+      (usdcx-clearing (if sbtc-is-binding usdcx-value-of-sbtc total-usdcx))
+      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-usdcx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
+      (usdcx-fee (/ (* usdcx-clearing FEE_BPS) BPS_PRECISION))
+      (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
+    )
+      (asserts! (> btc-price u0) ERR_ZERO_PRICE)
+      (var-set dust-filter-total-usdcx total-usdcx)
+      (var-set dust-filter-total-sbtc total-sbtc)
+      (var-set dust-filter-sbtc-reward (- sbtc-clearing sbtc-fee))
+      (var-set dust-filter-usdcx-reward (- usdcx-clearing usdcx-fee))
+      (map filter-dust-usdcx-depositor (get-usdcx-depositors cycle))
+      (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
+      (var-set deposits-closed-block stacks-block-height)
+      (print { event: "close-deposits",
+               cycle: cycle,
+               closed-at-block: stacks-block-height,
+               elapsed-blocks: elapsed })
+      (ok true))))
 
 (define-public (settle)
   (let (

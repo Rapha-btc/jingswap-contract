@@ -115,6 +115,8 @@
 ;; Dust filter context (set by close-deposits, used by filter-dust-* fns)
 (define-data-var dust-filter-total-stx uint u0)
 (define-data-var dust-filter-total-sbtc uint u0)
+(define-data-var dust-filter-sbtc-reward uint u0)
+(define-data-var dust-filter-stx-reward uint u0)
 
 ;; ============================================================================
 ;; Data maps
@@ -398,18 +400,17 @@
 ;; Private: Dust filter (refund depositors whose pro-rata share would round to 0)
 ;; ============================================================================
 
-;; Refund STX depositor if their share of sBTC (net fees) would round to 0.
-;; Check: deposit * total-sbtc * (BPS - FEE) < total-stx * BPS
+;; Refund STX depositor if their share of sbtc-cleared-after-fee would round to 0.
+;; Check: deposit * sbtc-reward < total-stx
 (define-private (filter-dust-stx-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
     (ccl-totals (get-cycle-totals cycle))
     (amount (get-stx-deposit cycle depositor))
     (total-stx (var-get dust-filter-total-stx))
-    (total-sbtc (var-get dust-filter-total-sbtc))
+    (sbtc-reward (var-get dust-filter-sbtc-reward))
   )
-    (if (< (* amount (* total-sbtc (- BPS_PRECISION FEE_BPS)))
-                (* total-stx BPS_PRECISION))
+    (if (< (* amount sbtc-reward) total-stx)
       (begin
         (try! (as-contract? ((with-stx amount))
           (try! (stx-transfer? amount current-contract depositor))))
@@ -425,18 +426,17 @@
         (ok true))
       (ok true))))
 
-;; Refund sBTC depositor if their share of STX (net fees) would round to 0.
-;; Check: deposit * total-stx * (BPS - FEE) < total-sbtc * BPS
+;; Refund sBTC depositor if their share of stx-cleared-after-fee would round to 0.
+;; Check: deposit * stx-reward < total-sbtc
 (define-private (filter-dust-sbtc-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
     (ccl-totals (get-cycle-totals cycle))
     (amount (get-sbtc-deposit cycle depositor))
-    (total-stx (var-get dust-filter-total-stx))
+    (stx-reward (var-get dust-filter-stx-reward))
     (total-sbtc (var-get dust-filter-total-sbtc))
   )
-    (if (< (* amount (* total-stx (- BPS_PRECISION FEE_BPS)))
-                (* total-sbtc BPS_PRECISION))
+    (if (< (* amount stx-reward) total-sbtc)
       (begin
         (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
           (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -458,9 +458,14 @@
 ;; ============================================================================
 
 ;; Anyone can close deposits after DEPOSIT_MIN_BLOCKS have passed.
-;; After closing, dust depositors (whose pro-rata share would round to 0)
-;; are refunded and removed before settlement runs.
-(define-public (close-deposits)
+;; Refreshes Pyth prices to compute exact clearing amounts, then filters
+;; dust depositors whose pro-rata share would round to 0.
+(define-public (close-deposits
+  (btc-vaa (buff 8192))
+  (stx-vaa (buff 8192))
+  (pyth-storage <pyth-storage-trait>)
+  (pyth-decoder <pyth-decoder-trait>)
+  (wormhole-core <wormhole-core-trait>))
   (let (
     (cycle (var-get current-cycle))
     (elapsed (get-blocks-elapsed))
@@ -470,17 +475,53 @@
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-stx totals) (var-get min-stx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
-    ;; Dust filter: refund depositors whose share would round to 0
-    (var-set dust-filter-total-stx (get total-stx totals))
-    (var-set dust-filter-total-sbtc (get total-sbtc totals))
-    (map filter-dust-stx-depositor (get-stx-depositors cycle))
-    (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
-    (var-set deposits-closed-block stacks-block-height)
-    (print { event: "close-deposits",
-             cycle: cycle,
-             closed-at-block: stacks-block-height,
-             elapsed-blocks: elapsed })
-    (ok true)))
+    ;; Refresh Pyth prices for accurate dust filter
+    (try! (contract-call?
+      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
+      verify-and-update-price-feeds btc-vaa
+      { pyth-storage-contract: pyth-storage,
+        pyth-decoder-contract: pyth-decoder,
+        wormhole-core-contract: wormhole-core }))
+    (try! (contract-call?
+      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
+      verify-and-update-price-feeds stx-vaa
+      { pyth-storage-contract: pyth-storage,
+        pyth-decoder-contract: pyth-decoder,
+        wormhole-core-contract: wormhole-core }))
+    (let (
+      (total-stx (get total-stx totals))
+      (total-sbtc (get total-sbtc totals))
+      (btc-feed (unwrap! (contract-call?
+        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
+        get-price BTC_USD_FEED) ERR_ZERO_PRICE))
+      (stx-feed (unwrap! (contract-call?
+        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
+        get-price STX_USD_FEED) ERR_ZERO_PRICE))
+      (btc-price (to-uint (get price btc-feed)))
+      (stx-price (to-uint (get price stx-feed)))
+      (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
+      (stx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
+      (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
+      (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
+      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
+      (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
+      (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
+    )
+      (asserts! (> btc-price u0) ERR_ZERO_PRICE)
+      (asserts! (> stx-price u0) ERR_ZERO_PRICE)
+      ;; Dust filter with exact clearing amounts
+      (var-set dust-filter-total-stx total-stx)
+      (var-set dust-filter-total-sbtc total-sbtc)
+      (var-set dust-filter-sbtc-reward (- sbtc-clearing sbtc-fee))
+      (var-set dust-filter-stx-reward (- stx-clearing stx-fee))
+      (map filter-dust-stx-depositor (get-stx-depositors cycle))
+      (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
+      (var-set deposits-closed-block stacks-block-height)
+      (print { event: "close-deposits",
+               cycle: cycle,
+               closed-at-block: stacks-block-height,
+               elapsed-blocks: elapsed })
+      (ok true))))
 
 ;; ============================================================================
 ;; Public: Settlement (settle phase, open-ended until success)
