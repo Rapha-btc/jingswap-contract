@@ -85,3 +85,6 @@ All pass with the dust filter + price-aware close-deposits:
 - [ ] Re-run all simulations (they now need VAAs for close-deposits)
 - [ ] Add new simulation: dust filter with price-aware clearing (the edge case where pool imbalance + price makes share round to 0 even though pool ratio alone wouldn't)
 - [ ] Update `README-stxer.md` with new simulation links
+
+rr: refresh all stxer simulations with priced closed deposits
+rr: full unit test clarinet 
