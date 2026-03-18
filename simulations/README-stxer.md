@@ -385,6 +385,52 @@ Oracle price: `u28249298546088` (~282,492 STX/BTC)
 | settle-with-refresh | https://stxer.xyz/simulations/mainnet/517812a247e579112459da110d9df64d |
 | Same depositor both sides | https://stxer.xyz/simulations/mainnet/7d94200e1aeeb7e6dce1c2bb81cd452f |
 
+## Simulation 6: Dust filter (`simul-dust-filter.js`)
+
+Tests both dust protection rules added in v1:
+
+- **Rule 1 (close-deposits):** Depositors whose pro-rata share would round to 0 are refunded and removed before settlement.
+- **Rule 2 (distribute):** Unfilled amounts below minimum (1 STX / 1,000 sats) are refunded instead of rolling to prevent dust accumulation.
+
+```bash
+npx tsx simulations/simul-dust-filter.js
+```
+
+### Scenario
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Deploy v1 contract | Success |
+| 2 | STX whale deposits 10,000 STX | `(ok u10000000000)` |
+| 3 | Dust depositor deposits 1 STX (minimum) | `(ok u1000000)` |
+| 4 | sBTC depositor deposits 1,000 sats (tiny pool) | `(ok u1000)` |
+| 5 | Close deposits | Dust depositor refunded (dust-refund-stx event), removed from list |
+| 6 | Settle | Only whale participates |
+| 7 | Check cycle 1 | Dust depositor not rolled (refunded at close) |
+
+The dust depositor's pro-rata share of 1,000 sats: `(1M * 1000 * 9990) / (10001M * 10000) ≈ 0` — correctly filtered.
+
+## Latest simulations (v1 — with dust filter)
+
+| Test | Link |
+|------|------|
+| Full lifecycle | https://stxer.xyz/simulations/mainnet/1f36ae4012a2df7be55ef5882e811933 |
+| Priority queue bumping | https://stxer.xyz/simulations/mainnet/3b14c1265de17ae82d99a1d97198a144 |
+| Cancel flows | https://stxer.xyz/simulations/mainnet/c844c139e995071c205a6e41d54ed9b1 |
+| settle-with-refresh | https://stxer.xyz/simulations/mainnet/d5f7c8a35b665204c0dbea95ff8c43d3 |
+| Same depositor both sides | https://stxer.xyz/simulations/mainnet/910bdd012c6be04d2ec463c845fe5fd5 |
+| Dust filter | https://stxer.xyz/simulations/mainnet/027056edf58a8bc3cbd5bee53e617fbc |
+| Deploy v1 contracts | https://stxer.xyz/simulations/mainnet/d5cb371526162f60bcab43ca1baa43bf |
+
+### USDCx simulations (v1)
+
+| Test | Link |
+|------|------|
+| Full lifecycle | https://stxer.xyz/simulations/mainnet/3980022aae48736e74a5a8c9addf7cb0 |
+| Cancel flows | https://stxer.xyz/simulations/mainnet/f11cfd18308478cae8ba96a62b31951d |
+| Same depositor | https://stxer.xyz/simulations/mainnet/9fcadc5aa65cca500fe4d65fd045161a |
+| settle-with-refresh | https://stxer.xyz/simulations/mainnet/14bbd5b5e3525d4e36586044e960ca0d |
+
 ## Bugs found and fixed via stxer
 
 1. **Decimal factor missing** — settlement math treated sats (8 decimals) as if STX also had 8 decimals. Result was 100x off. Fixed by adding `DECIMAL_FACTOR u100` (10^8/10^6) to `stx-value-of-sbtc` and `sbtc-clearing` formulas.
@@ -392,3 +438,5 @@ Oracle price: `u28249298546088` (~282,492 STX/BTC)
 2. **MAX_STALENESS underflow** — setting `MAX_STALENESS` to `u9999999999` caused `(- stacks-block-time MAX_STALENESS)` to underflow since the unix timestamp (~1.74B) is smaller. Fixed by using `u999999999` (~31 years).
 
 3. **distribute functions return type** — `distribute-to-stx-depositor` and `distribute-to-sbtc-depositor` used `try!` but returned `bool`. Changed to `(ok true)` for proper `(response bool uint)` return type.
+
+4. **cycle-totals name conflict** — Clarity doesn't allow let bindings to shadow map names. Dust filter functions used `cycle-totals` as a local variable, conflicting with `(define-map cycle-totals ...)`. Fixed by renaming local to `ccl-totals`.
