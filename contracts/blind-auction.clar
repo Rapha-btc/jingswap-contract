@@ -403,7 +403,7 @@
 (define-private (filter-dust-stx-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
-    (cycle-totals (get-cycle-totals cycle))
+    (ccl-totals (get-cycle-totals cycle))
     (amount (get-stx-deposit cycle depositor))
     (total-stx (var-get dust-filter-total-stx))
     (total-sbtc (var-get dust-filter-total-sbtc))
@@ -418,8 +418,8 @@
         (map-set stx-depositor-list cycle
           (filter not-eq-bumped-stx (get-stx-depositors cycle)))
         (map-set cycle-totals cycle
-          (merge cycle-totals
-            { total-stx: (- (get total-stx cycle-totals) amount) }))
+          (merge ccl-totals
+            { total-stx: (- (get total-stx ccl-totals) amount) }))
         (var-set dust-filter-total-stx (- total-stx amount))
         (print { event: "dust-refund-stx", depositor: depositor, cycle: cycle, amount: amount})
         (ok true))
@@ -430,7 +430,7 @@
 (define-private (filter-dust-sbtc-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
-    (cycle-totals (get-cycle-totals cycle))
+    (ccl-totals (get-cycle-totals cycle))
     (amount (get-sbtc-deposit cycle depositor))
     (total-stx (var-get dust-filter-total-stx))
     (total-sbtc (var-get dust-filter-total-sbtc))
@@ -446,8 +446,8 @@
         (map-set sbtc-depositor-list cycle
           (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
         (map-set cycle-totals cycle
-          (merge cycle-totals
-            { total-sbtc: (- (get total-sbtc cycle-totals) amount) }))
+          (merge ccl-totals
+            { total-sbtc: (- (get total-sbtc ccl-totals) amount) }))
         (var-set dust-filter-total-sbtc (- total-sbtc amount))
         (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: amount})
         (ok true))
