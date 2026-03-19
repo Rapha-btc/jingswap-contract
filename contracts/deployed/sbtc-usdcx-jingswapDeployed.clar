@@ -13,8 +13,6 @@
 (define-constant MAX_DEPOSITORS u50)
 (define-constant FEE_BPS u10)
 (define-constant BPS_PRECISION u10000)
-(define-constant MIN_SHARE_BPS u20)
-
 (define-constant PRICE_PRECISION u100000000)
 
 (define-constant DECIMAL_FACTOR u100)
@@ -313,75 +311,18 @@
     (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
 
-(define-private (filter-small-usdcx-depositor (depositor principal))
-  (let (
-    (cycle (var-get current-cycle))
-    (totals (get-cycle-totals cycle))
-    (total-usdcx (get total-usdcx totals))
-    (amount (get-usdcx-deposit cycle depositor))
-    (next-cycle (+ cycle u1))
-    (totals-next (get-cycle-totals next-cycle))
-  )
-    (if (< (* amount BPS_PRECISION) (* total-usdcx MIN_SHARE_BPS))
-      (begin
-        (map-set usdcx-deposits { cycle: next-cycle, depositor: depositor } amount)
-        (map-set usdcx-depositor-list next-cycle
-          (unwrap-panic (as-max-len? (append (get-usdcx-depositors next-cycle) depositor) u50)))
-        (map-set cycle-totals next-cycle
-          (merge totals-next
-            { total-usdcx: (+ (get total-usdcx totals-next) amount) }))
-        (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
-        (var-set bumped-usdcx-principal depositor)
-        (map-set usdcx-depositor-list cycle
-          (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
-        (map-set cycle-totals cycle
-          (merge totals { total-usdcx: (- total-usdcx amount) }))
-        (print { event: "small-share-roll-usdcx", depositor: depositor, cycle: cycle, amount: amount })
-        (ok true))
-      (ok true))))
-
-(define-private (filter-small-sbtc-depositor (depositor principal))
-  (let (
-    (cycle (var-get current-cycle))
-    (totals (get-cycle-totals cycle))
-    (total-sbtc (get total-sbtc totals))
-    (amount (get-sbtc-deposit cycle depositor))
-    (next-cycle (+ cycle u1))
-    (totals-next (get-cycle-totals next-cycle))
-  )
-    (if (< (* amount BPS_PRECISION) (* total-sbtc MIN_SHARE_BPS))
-      (begin
-        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
-        (map-set sbtc-depositor-list next-cycle
-          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
-        (map-set cycle-totals next-cycle
-          (merge totals-next
-            { total-sbtc: (+ (get total-sbtc totals-next) amount) }))
-        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
-        (var-set bumped-sbtc-principal depositor)
-        (map-set sbtc-depositor-list cycle
-          (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
-        (map-set cycle-totals cycle
-          (merge totals { total-sbtc: (- total-sbtc amount) }))
-        (print { event: "small-share-roll-sbtc", depositor: depositor, cycle: cycle, amount: amount })
-        (ok true))
-      (ok true))))
-
 (define-public (close-deposits)
   (let (
-    (cycle (var-get current-cycle))
     (elapsed (get-blocks-elapsed))
-    (totals (get-cycle-totals cycle))
+    (totals (get-cycle-totals (var-get current-cycle)))
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-usdcx totals) (var-get min-usdcx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
-    (map filter-small-usdcx-depositor (get-usdcx-depositors cycle))
-    (map filter-small-sbtc-depositor (get-sbtc-depositors cycle))
     (var-set deposits-closed-block stacks-block-height)
     (print { event: "close-deposits",
-             cycle: cycle,
+             cycle: (var-get current-cycle),
              closed-at-block: stacks-block-height,
              elapsed-blocks: elapsed })
     (ok true)))
