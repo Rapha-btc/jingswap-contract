@@ -484,6 +484,7 @@
     (usdcx-unfilled (- total-usdcx usdcx-clearing))
     (sbtc-unfilled (- total-sbtc sbtc-clearing))
     (min-freshness (- stacks-block-time MAX_STALENESS))
+    (totals-next (get-cycle-totals (+ cycle u1)))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
@@ -528,7 +529,8 @@
       true)
 
     (map-set cycle-totals (+ cycle u1)
-      { total-usdcx: usdcx-unfilled, total-sbtc: sbtc-unfilled })
+      { total-usdcx: (+ (get total-usdcx totals-next) usdcx-unfilled),
+        total-sbtc: (+ (get total-sbtc totals-next) sbtc-unfilled) })
 
     (var-set settle-usdcx-cleared usdcx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
