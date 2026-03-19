@@ -1,4 +1,3 @@
-
 (use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
@@ -13,7 +12,6 @@
 (define-constant FEE_BPS u10)
 (define-constant BPS_PRECISION u10000)
 (define-constant MIN_SHARE_BPS u20)
-
 (define-constant PRICE_PRECISION u100000000)
 
 (define-constant DECIMAL_FACTOR u100)
@@ -61,8 +59,6 @@
 (define-data-var settle-stx-after-fee uint u0)
 (define-data-var bumped-stx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
-
-
 
 (define-map stx-deposits
   { cycle: uint, depositor: principal }
