@@ -323,15 +323,15 @@
         (map-set stx-deposits { cycle: next-cycle, depositor: depositor } amount)
         (map-set stx-depositor-list next-cycle
           (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
+        (map-set cycle-totals next-cycle
+          (merge totals-next
+            { total-stx: (+ (get total-stx totals-next) amount) }))
         (map-delete stx-deposits { cycle: cycle, depositor: depositor })
         (var-set bumped-stx-principal depositor)
         (map-set stx-depositor-list cycle
           (filter not-eq-bumped-stx (get-stx-depositors cycle)))
         (map-set cycle-totals cycle
           (merge totals { total-stx: (- total-stx amount) }))
-        (map-set cycle-totals next-cycle
-          (merge totals-next
-            { total-stx: (+ (get total-stx totals-next) amount) }))
         (print { event: "small-share-roll-stx", depositor: depositor, cycle: cycle, amount: amount })
         (ok true))
       (ok true))))
@@ -350,15 +350,15 @@
         (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
         (map-set sbtc-depositor-list next-cycle
           (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+        (map-set cycle-totals next-cycle
+          (merge totals-next
+            { total-sbtc: (+ (get total-sbtc totals-next) amount) }))
         (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
         (var-set bumped-sbtc-principal depositor)
         (map-set sbtc-depositor-list cycle
           (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (- total-sbtc amount) }))
-        (map-set cycle-totals next-cycle
-          (merge totals-next
-            { total-sbtc: (+ (get total-sbtc totals-next) amount) }))
         (print { event: "small-share-roll-sbtc", depositor: depositor, cycle: cycle, amount: amount })
         (ok true))
       (ok true))))
