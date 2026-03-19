@@ -41,6 +41,11 @@
 (define-constant FEE_BPS u10)
 (define-constant BPS_PRECISION u10000)
 
+;; Minimum share: 20 bps (0.20%) of side total to participate in settlement.
+;; Depositors below this threshold are rolled to next cycle at close-deposits.
+(define-constant MIN_SHARE_BPS u20)
+
+
 ;; Precision for price math (8 decimals, matches Pyth expo -8)
 (define-constant PRICE_PRECISION u100000000)
 
@@ -112,11 +117,6 @@
 (define-data-var bumped-stx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
 
-;; Dust filter context (set by close-deposits, used by filter-dust-* fns)
-(define-data-var dust-filter-total-stx uint u0)
-(define-data-var dust-filter-total-sbtc uint u0)
-(define-data-var dust-filter-sbtc-reward uint u0)
-(define-data-var dust-filter-stx-reward uint u0)
 
 ;; ============================================================================
 ;; Data maps
@@ -397,59 +397,61 @@
     (ok amount)))
 
 ;; ============================================================================
-;; Private: Dust filter (refund depositors whose pro-rata share would round to 0)
+;; Private: Small-share filter (roll depositors below MIN_SHARE_BPS to next cycle)
 ;; ============================================================================
 
-;; Refund STX depositor if their share of sbtc-cleared-after-fee would round to 0.
-;; Check: deposit * sbtc-reward < total-stx
-(define-private (filter-dust-stx-depositor (depositor principal))
+;; Roll STX depositor to next cycle if their deposit is < 0.2% of total STX.
+;; This protects small depositors from price drift between close and settle
+;; causing their pro-rata share to round to zero.
+(define-private (filter-small-stx-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
-    (ccl-totals (get-cycle-totals cycle))
+    (totals (get-cycle-totals cycle))
+    (total-stx (get total-stx totals))
     (amount (get-stx-deposit cycle depositor))
-    (total-stx (var-get dust-filter-total-stx))
-    (sbtc-reward (var-get dust-filter-sbtc-reward))
+    (next-cycle (+ cycle u1))
   )
-    (if (< (* amount sbtc-reward) total-stx)
+    (if (< (* amount BPS_PRECISION) (* total-stx MIN_SHARE_BPS))
       (begin
-        (try! (as-contract? ((with-stx amount))
-          (try! (stx-transfer? amount current-contract depositor))))
+        (map-set stx-deposits { cycle: next-cycle, depositor: depositor } amount)
+        (map-set stx-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
         (map-delete stx-deposits { cycle: cycle, depositor: depositor })
         (var-set bumped-stx-principal depositor)
         (map-set stx-depositor-list cycle
           (filter not-eq-bumped-stx (get-stx-depositors cycle)))
         (map-set cycle-totals cycle
-          (merge ccl-totals
-            { total-stx: (- (get total-stx ccl-totals) amount) }))
-        (var-set dust-filter-total-stx (- total-stx amount))
-        (print { event: "dust-refund-stx", depositor: depositor, cycle: cycle, amount: amount})
+          (merge totals { total-stx: (- total-stx amount) }))
+        (map-set cycle-totals next-cycle
+          (merge (get-cycle-totals next-cycle)
+            { total-stx: (+ (get total-stx (get-cycle-totals next-cycle)) amount) }))
+        (print { event: "small-share-roll-stx", depositor: depositor, cycle: cycle, amount: amount })
         (ok true))
       (ok true))))
 
-;; Refund sBTC depositor if their share of stx-cleared-after-fee would round to 0.
-;; Check: deposit * stx-reward < total-sbtc
-(define-private (filter-dust-sbtc-depositor (depositor principal))
+(define-private (filter-small-sbtc-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
-    (ccl-totals (get-cycle-totals cycle))
+    (totals (get-cycle-totals cycle))
+    (total-sbtc (get total-sbtc totals))
     (amount (get-sbtc-deposit cycle depositor))
-    (stx-reward (var-get dust-filter-stx-reward))
-    (total-sbtc (var-get dust-filter-total-sbtc))
+    (next-cycle (+ cycle u1))
   )
-    (if (< (* amount stx-reward) total-sbtc)
+    (if (< (* amount BPS_PRECISION) (* total-sbtc MIN_SHARE_BPS))
       (begin
-        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
-          (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-            transfer amount current-contract depositor none))))
+        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
+        (map-set sbtc-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
         (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
         (var-set bumped-sbtc-principal depositor)
         (map-set sbtc-depositor-list cycle
           (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
         (map-set cycle-totals cycle
-          (merge ccl-totals
-            { total-sbtc: (- (get total-sbtc ccl-totals) amount) }))
-        (var-set dust-filter-total-sbtc (- total-sbtc amount))
-        (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: amount})
+          (merge totals { total-sbtc: (- total-sbtc amount) }))
+        (map-set cycle-totals next-cycle
+          (merge (get-cycle-totals next-cycle)
+            { total-sbtc: (+ (get total-sbtc (get-cycle-totals next-cycle)) amount) }))
+        (print { event: "small-share-roll-sbtc", depositor: depositor, cycle: cycle, amount: amount })
         (ok true))
       (ok true))))
 
@@ -458,14 +460,8 @@
 ;; ============================================================================
 
 ;; Anyone can close deposits after DEPOSIT_MIN_BLOCKS have passed.
-;; Refreshes Pyth prices to compute exact clearing amounts, then filters
-;; dust depositors whose pro-rata share would round to 0.
-(define-public (close-deposits
-  (btc-vaa (buff 8192))
-  (stx-vaa (buff 8192))
-  (pyth-storage <pyth-storage-trait>)
-  (pyth-decoder <pyth-decoder-trait>)
-  (wormhole-core <wormhole-core-trait>))
+;; Rolls depositors below 0.2% of their side's total to the next cycle.
+(define-public (close-deposits)
   (let (
     (cycle (var-get current-cycle))
     (elapsed (get-blocks-elapsed))
@@ -475,53 +471,14 @@
     (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-stx totals) (var-get min-stx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
-    ;; Refresh Pyth prices for accurate dust filter
-    (try! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-      verify-and-update-price-feeds btc-vaa
-      { pyth-storage-contract: pyth-storage,
-        pyth-decoder-contract: pyth-decoder,
-        wormhole-core-contract: wormhole-core }))
-    (try! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-      verify-and-update-price-feeds stx-vaa
-      { pyth-storage-contract: pyth-storage,
-        pyth-decoder-contract: pyth-decoder,
-        wormhole-core-contract: wormhole-core }))
-    (let (
-      (total-stx (get total-stx totals))
-      (total-sbtc (get total-sbtc totals))
-      (btc-feed (unwrap! (contract-call?
-        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-        get-price BTC_USD_FEED) ERR_ZERO_PRICE))
-      (stx-feed (unwrap! (contract-call?
-        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-        get-price STX_USD_FEED) ERR_ZERO_PRICE))
-      (btc-price (to-uint (get price btc-feed)))
-      (stx-price (to-uint (get price stx-feed)))
-      (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
-      (stx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
-      (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
-      (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
-      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
-      (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
-      (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
-    )
-      (asserts! (> btc-price u0) ERR_ZERO_PRICE)
-      (asserts! (> stx-price u0) ERR_ZERO_PRICE)
-      ;; Dust filter with exact clearing amounts
-      (var-set dust-filter-total-stx total-stx)
-      (var-set dust-filter-total-sbtc total-sbtc)
-      (var-set dust-filter-sbtc-reward (- sbtc-clearing sbtc-fee))
-      (var-set dust-filter-stx-reward (- stx-clearing stx-fee))
-      (map filter-dust-stx-depositor (get-stx-depositors cycle))
-      (map filter-dust-sbtc-depositor (get-sbtc-depositors cycle))
-      (var-set deposits-closed-block stacks-block-height)
-      (print { event: "close-deposits",
-               cycle: cycle,
-               closed-at-block: stacks-block-height,
-               elapsed-blocks: elapsed })
-      (ok true))))
+    (map filter-small-stx-depositor (get-stx-depositors cycle))
+    (map filter-small-sbtc-depositor (get-sbtc-depositors cycle))
+    (var-set deposits-closed-block stacks-block-height)
+    (print { event: "close-deposits",
+             cycle: cycle,
+             closed-at-block: stacks-block-height,
+             elapsed-blocks: elapsed })
+    (ok true)))
 
 ;; ============================================================================
 ;; Public: Settlement (settle phase, open-ended until success)
@@ -700,7 +657,6 @@
 ;; ============================================================================
 
 ;; Send sBTC to STX depositor, roll unfilled STX to next cycle.
-;; If unfilled amount is below min-stx-deposit, refund instead of rolling.
 (define-private (distribute-to-stx-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
@@ -709,7 +665,6 @@
     (my-sbtc-received (if (> total-stx u0) (/ (* my-deposit (var-get settle-sbtc-after-fee)) total-stx) u0))
     (my-stx-unfilled (if (> total-stx u0) (/ (* my-deposit (- total-stx (var-get settle-stx-cleared))) total-stx) u0))
     (next-cycle (+ cycle u1))
-    (min-stx (var-get min-stx-deposit))
   )
     (map-delete stx-deposits { cycle: cycle, depositor: depositor })
     (if (> my-sbtc-received u0)
@@ -718,31 +673,23 @@
           transfer my-sbtc-received current-contract depositor none))))
       true)
     (if (> my-stx-unfilled u0)
-      (if (< my-stx-unfilled min-stx)
-        ;; Below min: refund instead of rolling to prevent dust accumulation
-        (begin
-          (try! (as-contract? ((with-stx my-stx-unfilled))
-            (try! (stx-transfer? my-stx-unfilled current-contract depositor))))
-          (print { event: "dust-refund-stx", depositor: depositor, cycle: cycle, amount: my-stx-unfilled })
-          true)
-        (begin
-          (map-set stx-deposits
-            { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
-          (map-set stx-depositor-list next-cycle
-                (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
-          true))
+      (begin
+        (map-set stx-deposits
+          { cycle: next-cycle, depositor: depositor } my-stx-unfilled)
+        (map-set stx-depositor-list next-cycle
+              (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
+        true)
       true)
     (print {
       event: "distribute-stx-depositor",
       depositor: depositor,
       cycle: cycle,
       sbtc-received: my-sbtc-received,
-      stx-rolled: (if (>= my-stx-unfilled min-stx) my-stx-unfilled u0)
+      stx-rolled: my-stx-unfilled
     })
     (ok true)))
 
 ;; Send STX to sBTC depositor, roll unfilled sBTC to next cycle.
-;; If unfilled amount is below min-sbtc-deposit, refund instead of rolling.
 (define-private (distribute-to-sbtc-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
@@ -751,7 +698,6 @@
     (my-stx-received (if (> total-sbtc u0) (/ (* my-deposit (var-get settle-stx-after-fee)) total-sbtc) u0))
     (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc (var-get settle-sbtc-cleared))) total-sbtc) u0))
     (next-cycle (+ cycle u1))
-    (min-sbtc (var-get min-sbtc-deposit))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
     (if (> my-stx-received u0)
@@ -759,27 +705,19 @@
         (try! (stx-transfer? my-stx-received current-contract depositor))))
       true)
     (if (> my-sbtc-unfilled u0)
-      (if (< my-sbtc-unfilled min-sbtc)
-        ;; Below min: refund instead of rolling to prevent dust accumulation
-        (begin
-          (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-unfilled))
-            (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-              transfer my-sbtc-unfilled current-contract depositor none))))
-          (print { event: "dust-refund-sbtc", depositor: depositor, cycle: cycle, amount: my-sbtc-unfilled})
-          true)
-        (begin
-          (map-set sbtc-deposits
-            { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
-          (map-set sbtc-depositor-list next-cycle
-            (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
-          true))
+      (begin
+        (map-set sbtc-deposits
+          { cycle: next-cycle, depositor: depositor } my-sbtc-unfilled)
+        (map-set sbtc-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+        true)
       true)
     (print {
       event: "distribute-sbtc-depositor",
       depositor: depositor,
       cycle: cycle,
       stx-received: my-stx-received,
-      sbtc-rolled: (if (>= my-sbtc-unfilled min-sbtc) my-sbtc-unfilled u0)
+      sbtc-rolled: my-sbtc-unfilled
     })
     (ok true)))
 
