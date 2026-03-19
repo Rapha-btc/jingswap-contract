@@ -102,7 +102,11 @@ https://stxer.xyz/simulations/mainnet/d44c0a4b3bf9e8707dd5abbfa09a51c6
 
 https://stxer.xyz/simulations/mainnet/a79794728e8cf5f63a7582929c84af41
 
-Same pattern with USDCx instead of STX.
+| Cycle | What happens |
+|-------|-------------|
+| 0 | Whale deposits 1000 USDCx, 3 fish deposit 1 USDCx each (~0.1%). Close-deposits rolls all 3 fish to cycle 1. Whale settles with 100k sats sBTC. |
+| 1 | sBTC whale deposits 0.02 BTC, clears all whale USDCx (USDCx-binding). Fish rolled again (still <0.2% of 932M). Settlement preserves fish's 3M in cycle 2 totals. |
+| 2 | Small sBTC deposit. Fish are now 33% each of 3M total — pass filter, stay, and settle. Each receives 1,413 sats. |
 
 ## Summary
 
