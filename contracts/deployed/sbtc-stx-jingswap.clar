@@ -57,6 +57,10 @@
 (define-data-var settle-total-sbtc uint u0)
 (define-data-var settle-sbtc-after-fee uint u0)
 (define-data-var settle-stx-after-fee uint u0)
+(define-data-var acc-sbtc-out uint u0)
+(define-data-var acc-stx-out uint u0)
+(define-data-var acc-stx-rolled uint u0)
+(define-data-var acc-sbtc-rolled uint u0)
 (define-data-var bumped-stx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
 
@@ -389,8 +393,13 @@
     (cycle (var-get current-cycle))
   )
     (try! (execute-settlement cycle btc-feed stx-feed))
+    (var-set acc-sbtc-out u0)
+    (var-set acc-stx-out u0)
+    (var-set acc-stx-rolled u0)
+    (var-set acc-sbtc-rolled u0)
     (map distribute-to-stx-depositor (get-stx-depositors cycle))
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
+    (try! (roll-and-sweep-dust))
     (advance-cycle)
     (ok true)))
 
@@ -423,8 +432,13 @@
       (cycle (var-get current-cycle))
     )
       (try! (execute-settlement cycle btc-feed stx-feed))
+      (var-set acc-sbtc-out u0)
+      (var-set acc-stx-out u0)
+      (var-set acc-stx-rolled u0)
+      (var-set acc-sbtc-rolled u0)
       (map distribute-to-stx-depositor (get-stx-depositors cycle))
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
+      (try! (roll-and-sweep-dust))
       (advance-cycle)
       (ok true))))
       
@@ -473,7 +487,6 @@
     (stx-unfilled (- total-stx stx-clearing))
     (sbtc-unfilled (- total-sbtc sbtc-clearing))
     (min-freshness (- stacks-block-time MAX_STALENESS))
-    (totals-next (get-cycle-totals (+ cycle u1)))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
@@ -511,10 +524,6 @@
          transfer sbtc-fee current-contract (var-get treasury) none))))
       true)
 
-    (map-set cycle-totals (+ cycle u1)
-      { total-stx: (+ (get total-stx totals-next) stx-unfilled),
-        total-sbtc: (+ (get total-sbtc totals-next) sbtc-unfilled) })
-
     (var-set settle-stx-cleared stx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
     (var-set settle-total-stx total-stx)
@@ -545,6 +554,8 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete stx-deposits { cycle: cycle, depositor: depositor })
+    (var-set acc-sbtc-out (+ (var-get acc-sbtc-out) my-sbtc-received))
+    (var-set acc-stx-rolled (+ (var-get acc-stx-rolled) my-stx-unfilled))
     (if (> my-sbtc-received u0)
       (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -577,6 +588,8 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+    (var-set acc-stx-out (+ (var-get acc-stx-out) my-stx-received))
+    (var-set acc-sbtc-rolled (+ (var-get acc-sbtc-rolled) my-sbtc-unfilled))
     (if (> my-stx-received u0)
       (try! (as-contract? ((with-stx my-stx-received))
         (try! (stx-transfer? my-stx-received current-contract depositor))))
@@ -596,6 +609,44 @@
       stx-received: my-stx-received,
       sbtc-rolled: my-sbtc-unfilled
     })
+    (ok true)))
+
+(define-private (roll-and-sweep-dust)
+  (let (
+    (acc-stx-rol (var-get acc-stx-rolled))
+    (acc-sbtc-rol (var-get acc-sbtc-rolled))
+    (stx-payout-dust  (- (var-get settle-stx-after-fee) (var-get acc-stx-out)))
+    (stx-roll-dust    (- (- (var-get settle-total-stx) (var-get settle-stx-cleared))
+                          acc-stx-rol))
+    (stx-dust         (+ stx-payout-dust stx-roll-dust))
+    (sbtc-payout-dust (- (var-get settle-sbtc-after-fee) (var-get acc-sbtc-out)))
+    (sbtc-roll-dust   (- (- (var-get settle-total-sbtc) (var-get settle-sbtc-cleared))
+                           acc-sbtc-rol))
+    (sbtc-dust        (+ sbtc-payout-dust sbtc-roll-dust))
+    (next-cycle       (+ (var-get current-cycle) u1))
+    (next-totals      (get-cycle-totals next-cycle))
+  )
+    (map-set cycle-totals next-cycle
+      { total-stx: (+ (get total-stx next-totals) acc-stx-rol),
+        total-sbtc: (+ (get total-sbtc next-totals) acc-sbtc-rol) })
+    (if (> stx-dust u0)
+      (try! (as-contract? ((with-stx stx-dust))
+        (try! (stx-transfer? stx-dust current-contract (var-get treasury)))))
+      true)
+    (if (> sbtc-dust u0)
+      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sbtc-dust))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer sbtc-dust current-contract (var-get treasury) none))))
+      true)
+    (print { event: "sweep-dust", 
+             stx-unfilled: acc-stx-rol,
+             sbtc-unfilled: acc-sbtc-rol,
+             stx-dust: stx-dust, 
+             stx-payout-dust: stx-payout-dust, 
+             stx-roll-dust: stx-roll-dust,
+             sbtc-dust: sbtc-dust,
+             sbtc-payout-dust: sbtc-payout-dust,
+             sbtc-roll-dust: sbtc-roll-dust })
     (ok true)))
 
 (define-read-only (get-dex-price)
