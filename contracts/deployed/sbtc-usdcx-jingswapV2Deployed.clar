@@ -1,3 +1,5 @@
+;; SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-usdcx-jing
+
 (use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
@@ -63,11 +65,6 @@
 (define-data-var settle-usdcx-after-fee uint u0)
 (define-data-var bumped-usdcx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
-
-(define-data-var acc-sbtc-out uint u0)
-(define-data-var acc-usdcx-out uint u0)
-(define-data-var acc-usdcx-rolled uint u0)
-(define-data-var acc-sbtc-rolled uint u0)
 
 (define-map usdcx-deposits
   { cycle: uint, depositor: principal }
@@ -402,13 +399,8 @@
     (cycle (var-get current-cycle))
   )
     (try! (execute-settlement cycle btc-feed stx-feed))
-    (var-set acc-sbtc-out u0)
-    (var-set acc-usdcx-out u0)
-    (var-set acc-usdcx-rolled u0)
-    (var-set acc-sbtc-rolled u0)
     (map distribute-to-usdcx-depositor (get-usdcx-depositors cycle))
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
-    (try! (roll-and-sweep-dust))
     (advance-cycle)
     (ok true)))
 
@@ -445,13 +437,8 @@
       (cycle (var-get current-cycle))
     )
       (try! (execute-settlement cycle btc-feed stx-feed))
-      (var-set acc-sbtc-out u0)
-      (var-set acc-usdcx-out u0)
-      (var-set acc-usdcx-rolled u0)
-      (var-set acc-sbtc-rolled u0)
       (map distribute-to-usdcx-depositor (get-usdcx-depositors cycle))
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
-      (try! (roll-and-sweep-dust))
       (advance-cycle)
       (ok true))))
 
@@ -500,6 +487,7 @@
     (usdcx-unfilled (- total-usdcx usdcx-clearing))
     (sbtc-unfilled (- total-sbtc sbtc-clearing))
     (min-freshness (- stacks-block-time MAX_STALENESS))
+    (totals-next (get-cycle-totals (+ cycle u1)))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
@@ -543,6 +531,10 @@
          transfer sbtc-fee current-contract (var-get treasury) none))))
       true)
 
+    (map-set cycle-totals (+ cycle u1)
+      { total-usdcx: (+ (get total-usdcx totals-next) usdcx-unfilled),
+        total-sbtc: (+ (get total-sbtc totals-next) sbtc-unfilled) })
+
     (var-set settle-usdcx-cleared usdcx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
     (var-set settle-total-usdcx total-usdcx)
@@ -573,8 +565,6 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
-    (var-set acc-sbtc-out (+ (var-get acc-sbtc-out) my-sbtc-received))
-    (var-set acc-usdcx-rolled (+ (var-get acc-usdcx-rolled) my-usdcx-unfilled))
     (if (> my-sbtc-received u0)
       (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -607,8 +597,6 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
-    (var-set acc-usdcx-out (+ (var-get acc-usdcx-out) my-usdcx-received))
-    (var-set acc-sbtc-rolled (+ (var-get acc-sbtc-rolled) my-sbtc-unfilled))
     (if (> my-usdcx-received u0)
       (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" my-usdcx-received))
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
@@ -629,45 +617,6 @@
       usdcx-received: my-usdcx-received,
       sbtc-rolled: my-sbtc-unfilled
     })
-    (ok true)))
-
-(define-private (roll-and-sweep-dust)
-  (let (
-    (acc-usdcx-rol (var-get acc-usdcx-rolled))
-    (acc-sbtc-rol (var-get acc-sbtc-rolled))
-    (usdcx-payout-dust  (- (var-get settle-usdcx-after-fee) (var-get acc-usdcx-out)))
-    (usdcx-roll-dust    (- (- (var-get settle-total-usdcx) (var-get settle-usdcx-cleared))
-                          acc-usdcx-rol))
-    (usdcx-dust         (+ usdcx-payout-dust usdcx-roll-dust))
-    (sbtc-payout-dust (- (var-get settle-sbtc-after-fee) (var-get acc-sbtc-out)))
-    (sbtc-roll-dust   (- (- (var-get settle-total-sbtc) (var-get settle-sbtc-cleared))
-                           acc-sbtc-rol))
-    (sbtc-dust        (+ sbtc-payout-dust sbtc-roll-dust))
-    (next-cycle       (+ (var-get current-cycle) u1))
-    (next-totals      (get-cycle-totals next-cycle))
-  )
-    (map-set cycle-totals next-cycle
-      { total-usdcx: (+ (get total-usdcx next-totals) acc-usdcx-rol),
-        total-sbtc: (+ (get total-sbtc next-totals) acc-sbtc-rol) })
-    (if (> usdcx-dust u0)
-      (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" usdcx-dust))
-        (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
-              transfer usdcx-dust current-contract (var-get treasury) none))))
-      true)
-    (if (> sbtc-dust u0)
-      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sbtc-dust))
-        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
-          transfer sbtc-dust current-contract (var-get treasury) none))))
-      true)
-    (print { event: "sweep-dust",
-             usdcx-unfilled: acc-usdcx-rol,
-             sbtc-unfilled: acc-sbtc-rol,
-             usdcx-dust: usdcx-dust,
-             usdcx-payout-dust: usdcx-payout-dust,
-             usdcx-roll-dust: usdcx-roll-dust,
-             sbtc-dust: sbtc-dust,
-             sbtc-payout-dust: sbtc-payout-dust,
-             sbtc-roll-dust: sbtc-roll-dust })
     (ok true)))
 
 (define-read-only (get-dex-price (stx-price uint))
