@@ -113,6 +113,12 @@
 (define-data-var settle-sbtc-after-fee uint u0)
 (define-data-var settle-stx-after-fee uint u0)
 
+;; Dust accumulators (track what distribute functions actually send/roll)
+(define-data-var acc-sbtc-out uint u0)    ;; sBTC paid to STX depositors
+(define-data-var acc-stx-out uint u0)     ;; STX paid to sBTC depositors
+(define-data-var acc-stx-rolled uint u0)  ;; unfilled STX rolled for STX depositors
+(define-data-var acc-sbtc-rolled uint u0) ;; unfilled sBTC rolled for sBTC depositors
+
 ;; Helper for filter
 (define-data-var bumped-stx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
@@ -498,8 +504,13 @@
     (cycle (var-get current-cycle))
   )
     (try! (execute-settlement cycle btc-feed stx-feed))
+    (var-set acc-sbtc-out u0)
+    (var-set acc-stx-out u0)
+    (var-set acc-stx-rolled u0)
+    (var-set acc-sbtc-rolled u0)
     (map distribute-to-stx-depositor (get-stx-depositors cycle))
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
+    (try! (roll-and-sweep-dust))
     (advance-cycle)
     (ok true)))
 
@@ -533,8 +544,13 @@
       (cycle (var-get current-cycle))
     )
       (try! (execute-settlement cycle btc-feed stx-feed))
+      (var-set acc-sbtc-out u0)
+      (var-set acc-stx-out u0)
+      (var-set acc-stx-rolled u0)
+      (var-set acc-sbtc-rolled u0)
       (map distribute-to-stx-depositor (get-stx-depositors cycle))
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
+      (try! (roll-and-sweep-dust))
       (advance-cycle)
       (ok true))))
 
@@ -631,10 +647,6 @@
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
          transfer sbtc-fee current-contract (var-get treasury) none))))
       true)
-    ;; Auto-roll unfilled totals into next cycle
-    (map-set cycle-totals (+ cycle u1)
-      { total-stx: (+ (get total-stx totals-next) stx-unfilled),
-        total-sbtc: (+ (get total-sbtc totals-next) sbtc-unfilled) })
     ;; Set context for distribute functions
     (var-set settle-stx-cleared stx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
@@ -671,6 +683,8 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete stx-deposits { cycle: cycle, depositor: depositor })
+    (var-set acc-sbtc-out (+ (var-get acc-sbtc-out) my-sbtc-received))
+    (var-set acc-stx-rolled (+ (var-get acc-stx-rolled) my-stx-unfilled))
     (if (> my-sbtc-received u0)
       (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -704,6 +718,8 @@
     (next-cycle (+ cycle u1))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+    (var-set acc-stx-out (+ (var-get acc-stx-out) my-stx-received))
+    (var-set acc-sbtc-rolled (+ (var-get acc-sbtc-rolled) my-sbtc-unfilled))
     (if (> my-stx-received u0)
       (try! (as-contract? ((with-stx my-stx-received))
         (try! (stx-transfer? my-stx-received current-contract depositor))))
@@ -723,6 +739,42 @@
       stx-received: my-stx-received,
       sbtc-rolled: my-sbtc-unfilled
     })
+    (ok true)))
+
+;; ============================================================================
+;; Private: Roll unfilled deposits and sweep rounding dust to treasury
+;; ============================================================================
+
+;; After pro-rata distribution, integer truncation leaves up to N-1 units
+;; (where N = depositors) of each token unaccounted for.
+;; Set next cycle totals from accumulators (exact) and sweep dust to treasury.
+(define-private (roll-and-sweep-dust)
+  (let (
+    (stx-payout-dust  (- (var-get settle-stx-after-fee) (var-get acc-stx-out)))
+    (stx-roll-dust    (- (- (var-get settle-total-stx) (var-get settle-stx-cleared))
+                          (var-get acc-stx-rolled)))
+    (stx-dust         (+ stx-payout-dust stx-roll-dust))
+    (sbtc-payout-dust (- (var-get settle-sbtc-after-fee) (var-get acc-sbtc-out)))
+    (sbtc-roll-dust   (- (- (var-get settle-total-sbtc) (var-get settle-sbtc-cleared))
+                           (var-get acc-sbtc-rolled)))
+    (sbtc-dust        (+ sbtc-payout-dust sbtc-roll-dust))
+    (next-cycle       (+ (var-get current-cycle) u1))
+    (next-totals      (get-cycle-totals next-cycle))
+  )
+    ;; Set next cycle totals from actual rolled amounts (no inflation)
+    (map-set cycle-totals next-cycle
+      { total-stx: (+ (get total-stx next-totals) (var-get acc-stx-rolled)),
+        total-sbtc: (+ (get total-sbtc next-totals) (var-get acc-sbtc-rolled)) })
+    (if (> stx-dust u0)
+      (try! (as-contract? ((with-stx stx-dust))
+        (try! (stx-transfer? stx-dust current-contract (var-get treasury)))))
+      true)
+    (if (> sbtc-dust u0)
+      (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" sbtc-dust))
+        (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          transfer sbtc-dust current-contract (var-get treasury) none))))
+      true)
+    (print { event: "sweep-dust", stx-dust: stx-dust, sbtc-dust: sbtc-dust })
     (ok true)))
 
 ;; ============================================================================
