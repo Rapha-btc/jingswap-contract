@@ -750,21 +750,23 @@
 ;; Set next cycle totals from accumulators (exact) and sweep dust to treasury.
 (define-private (roll-and-sweep-dust)
   (let (
+    (acc-stx-rol (var-get acc-stx-rolled))
+    (acc-sbtc-rol (var-get acc-sbtc-rolled))
     (stx-payout-dust  (- (var-get settle-stx-after-fee) (var-get acc-stx-out)))
     (stx-roll-dust    (- (- (var-get settle-total-stx) (var-get settle-stx-cleared))
-                          (var-get acc-stx-rolled)))
+                          acc-stx-rol))
     (stx-dust         (+ stx-payout-dust stx-roll-dust))
     (sbtc-payout-dust (- (var-get settle-sbtc-after-fee) (var-get acc-sbtc-out)))
     (sbtc-roll-dust   (- (- (var-get settle-total-sbtc) (var-get settle-sbtc-cleared))
-                           (var-get acc-sbtc-rolled)))
+                           acc-sbtc-rol))
     (sbtc-dust        (+ sbtc-payout-dust sbtc-roll-dust))
     (next-cycle       (+ (var-get current-cycle) u1))
     (next-totals      (get-cycle-totals next-cycle))
   )
     ;; Set next cycle totals from actual rolled amounts (no inflation)
     (map-set cycle-totals next-cycle
-      { total-stx: (+ (get total-stx next-totals) (var-get acc-stx-rolled)),
-        total-sbtc: (+ (get total-sbtc next-totals) (var-get acc-sbtc-rolled)) })
+      { total-stx: (+ (get total-stx next-totals) acc-stx-rol),
+        total-sbtc: (+ (get total-sbtc next-totals) acc-sbtc-rol) })
     (if (> stx-dust u0)
       (try! (as-contract? ((with-stx stx-dust))
         (try! (stx-transfer? stx-dust current-contract (var-get treasury)))))
@@ -774,7 +776,15 @@
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer sbtc-dust current-contract (var-get treasury) none))))
       true)
-    (print { event: "sweep-dust", stx-dust: stx-dust, sbtc-dust: sbtc-dust })
+    (print { event: "sweep-dust", 
+             stx-unfilled: acc-stx-rol,
+             sbtc-unfilled: acc-sbtc-rol,
+             stx-dust: stx-dust, 
+             stx-payout-dust: stx-payout-dust, 
+             stx-roll-dust: stx-roll-dust,
+             sbtc-dust: sbtc-dust,
+             sbtc-payout-dust: sbtc-payout-dust,
+             sbtc-roll-dust: sbtc-roll-dust })
     (ok true)))
 
 ;; ============================================================================
