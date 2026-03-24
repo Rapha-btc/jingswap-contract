@@ -283,6 +283,19 @@ Oracle price: `u7474774020885` (~$74,748/BTC)
 | settle-with-refresh | https://stxer.xyz/simulations/mainnet/30cb05572cd2106c53edf363a978e0ae |
 | Same depositor both sides | https://stxer.xyz/simulations/mainnet/b52724235a8990bf16b16a761c1fe324 |
 
+## v2 simulations — with dust sweep (`roll-and-sweep-dust`)
+
+### USDCx simulations (v2)
+
+| Test | Link | Status |
+|------|------|--------|
+| Full lifecycle | https://stxer.xyz/simulations/mainnet/7bb61203d4e6b22133625cae905276c4 | All green |
+| Cancel flows | https://stxer.xyz/simulations/mainnet/ffa7bd95cbdbae7d5e84153f58be267e | All green |
+| settle-with-refresh | https://stxer.xyz/simulations/mainnet/13a7ccfb90349b1c0c7ed6d9511e8522 | All green |
+| Same depositor both sides | https://stxer.xyz/simulations/mainnet/240454b682839842537d625ae9c3c238 | All green |
+| Dust sweep (3+3, sBTC side) | https://stxer.xyz/simulations/mainnet/13232cb32e81172b81de53b794523edd | All green |
+| Dust sweep (3+3, USDCx side) | https://stxer.xyz/simulations/mainnet/0733d9974580142296e402777c8a3da5 | All green |
+
 ## Bugs found via stxer
 
 1. **`if` arm type mismatch in `settle-with-refresh`** — the conditional STX VAA refresh used `(try! (contract-call? ... verify-and-update-price-feeds ...))` in one arm and `true` in the other. `try!` unwraps to a list of price feed tuples, not `bool`. Fixed by wrapping in `(begin ... true)` to discard the return value.

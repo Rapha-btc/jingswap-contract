@@ -431,6 +431,119 @@ The dust depositor's pro-rata share of 1,000 sats: `(1M * 1000 * 9990) / (10001M
 | Same depositor | https://stxer.xyz/simulations/mainnet/9fcadc5aa65cca500fe4d65fd045161a |
 | settle-with-refresh | https://stxer.xyz/simulations/mainnet/14bbd5b5e3525d4e36586044e960ca0d |
 
+## v2 simulations — with dust sweep (`roll-and-sweep-dust`)
+
+v2 adds accumulator-based dust sweep: after pro-rata distribution, any truncation remainder
+is sent to treasury instead of being orphaned in the contract. Next cycle totals are set from
+exact accumulator values (no inflation).
+
+### STX simulations (v2)
+
+| Test | Link | Status |
+|------|------|--------|
+| Full lifecycle | https://stxer.xyz/simulations/mainnet/2f652595bbd8b213f6e397090567a224 | All green |
+| Priority queue bumping | https://stxer.xyz/simulations/mainnet/20c998d12993b731ee33ea54c9a18637 | All green |
+| Cancel flows | https://stxer.xyz/simulations/mainnet/d56b02581a04bb66265a5426f872f08b | All green |
+| settle-with-refresh | https://stxer.xyz/simulations/mainnet/f035bac4bca7406e2f52fe9b837a805c | All green |
+| Same depositor both sides | https://stxer.xyz/simulations/mainnet/f842900e971fe7ffb61be7d18d04f086 | All green |
+| Dust filter | https://stxer.xyz/simulations/mainnet/f472214b524ac251146eca7a2818094b | All green |
+| Dust sweep (3+3, sBTC side) | https://stxer.xyz/simulations/mainnet/dc20efd552f38203d4d77b1b3fc4f0f3 | All green |
+| Dust sweep (3+3, STX side) | https://stxer.xyz/simulations/mainnet/7281b95ce2781eb980912f8f68d8cfa2 | All green |
+
+#### Full lifecycle (v2)
+
+Oracle price: `u28959302380167` (~289,593 STX/BTC)
+
+| Field | Value |
+|-------|-------|
+| binding-side | `"stx"` |
+| stx-cleared | `150,000,000` (all 150 STX) |
+| sbtc-cleared | `51,796` |
+| sbtc-unfilled | `48,204` |
+| stx-fee | `150,000` |
+| sbtc-fee | `51` |
+
+Distributions:
+- STX depositor (150 STX) → 51,745 sats sBTC, 0 STX rolled
+- sBTC depositor (100k sats) → 149,850,000 µSTX, 48,204 sats rolled
+
+Sweep event: `stx-dust=0, sbtc-dust=0` — expected with 1 depositor per side (no truncation).
+
+Cycle 1: `{ total-sbtc: u48204, total-stx: u0 }` — matches rolled deposit exactly.
+
+#### Priority queue bumping (v2) — first dust sweep observed
+
+5 STX depositors (4×2 + 1×3 STX), 5 sBTC depositors (4×2000 + 1×3000 sats). STX binding.
+
+Oracle price: `u28959302380167` (~289,593 STX/BTC)
+
+| Field | Value |
+|-------|-------|
+| stx-cleared | `11,000,000` (all 11 STX) |
+| sbtc-cleared | `3,798` |
+| sbtc-unfilled | `7,202` |
+
+Sweep event: **`sbtc-dust=2, sbtc-roll-dust=2`** — 2 sats swept to treasury.
+- 5 sBTC depositors rolled: 1,309 + 1,309 + 1,309 + 1,309 + 1,964 = **7,200**
+- Cycle 1 `total-sbtc` = **7,200** — exact match with sum of individual rolls
+- Without sweep, `total-sbtc` would have been 7,202 (full unfilled) with 2 orphaned sats
+
+This confirms the dust sweep works: the contract sent the 2-sat remainder to treasury
+instead of leaving it orphaned, and `cycle-totals` matches the actual depositor entries.
+
+#### Dust sweep — 3+3 depositors with odd amounts (designed for max truncation)
+
+3 STX depositors: 33,333,333 / 44,444,444 / 22,222,223 µSTX (total 100 STX)
+3 sBTC depositors: 33,333 / 44,444 / 22,223 sats (total 100,000 sats)
+
+STX binding. Oracle price: `u28959302380167`.
+
+| Field | Value |
+|-------|-------|
+| sbtc-cleared | `34,531` |
+| sbtc-unfilled | `65,469` |
+
+Sweep event: **`sbtc-payout-dust=2, sbtc-roll-dust=1, sbtc-dust=3`** — 3 sats swept to treasury.
+
+- sBTC payouts: 11,498 + 15,331 + 7,666 = 34,495. Pool was 34,497. **Payout dust = 2** ✓
+- sBTC rolls: 21,822 + 29,097 + 14,549 = 65,468. Unfilled was 65,469. **Roll dust = 1** ✓
+- Cycle 1 `total-sbtc` = **65,468** = exact sum of individual rolled deposits ✓
+- STX payouts: 33,299,667 + 44,399,556 + 22,200,777 = 99,900,000 = exact pool. **STX dust = 0** ✓
+
+This is the strongest proof: dust on both payout and roll sides, both swept correctly,
+cycle totals match depositor entries exactly.
+
+#### Dust sweep — STX side (sBTC binding, heavy STX vs light sBTC)
+
+3 STX depositors: 3,333,333,333 / 4,444,444,444 / 2,222,222,223 µSTX (~10,000 STX)
+3 sBTC depositors: 1,333 / 1,444 / 1,223 sats (4,000 sats)
+
+sBTC binding (all 4,000 sats cleared). Oracle price: `u28999146695398`.
+
+Sweep event: **`stx-dust=2 (payout=1, roll=1), sbtc-dust=2 (payout=2, roll=0)`**
+
+**Dust on BOTH tokens simultaneously.** Full accounting:
+
+```
+STX (10,000,000,000 µSTX deposited):
+  fee:      11,599 → treasury
+  payouts:  3,861,720 + 4,183,289 + 3,543,049 = 11,588,058 → sBTC depositors
+  rolled:   3,329,466,780 + 4,439,289,040 + 2,219,644,521 = 9,988,400,341 → cycle 1
+  dust:     2 µSTX → treasury
+  total:    11,599 + 11,588,058 + 9,988,400,341 + 2 = 10,000,000,000 ✓
+
+sBTC (4,000 sats deposited):
+  fee:      4 → treasury
+  payouts:  1,331 + 1,775 + 888 = 3,994 → STX depositors
+  rolled:   0 (binding side, fully cleared)
+  dust:     2 sats → treasury
+  total:    4 + 3,994 + 0 + 2 = 4,000 ✓
+```
+
+Cycle 1: `{ total-stx: 9,988,400,341, total-sbtc: 0 }` = exact sum of rolled deposits ✓
+
+Zero left in contract. This proves dust sweep works on **both sides** — regardless of which side is binding.
+
 ## Bugs found and fixed via stxer
 
 1. **Decimal factor missing** — settlement math treated sats (8 decimals) as if STX also had 8 decimals. Result was 100x off. Fixed by adding `DECIMAL_FACTOR u100` (10^8/10^6) to `stx-value-of-sbtc` and `sbtc-clearing` formulas.
