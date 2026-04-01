@@ -64,3 +64,18 @@ epoch = "latest"
 path = "contracts/blind-auction-stxer.clar"
 clarity_version = 4
 epoch = "latest"
+
+[contracts.jing-vault-auth]
+path = "contracts/jing-vault-auth.clar"
+clarity_version = 4
+epoch = "latest"
+
+[contracts.jing-vault-registry]
+path = "contracts/jing-vault-registry.clar"
+clarity_version = 4
+epoch = "latest"
+
+[contracts.jing-vault-v1]
+path = "contracts/jing-vault-v1.clar"
+clarity_version = 4
+epoch = "latest"
