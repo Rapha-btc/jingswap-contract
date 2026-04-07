@@ -1,11 +1,21 @@
-;; title: blind-auction
-;; version: 0.8.0
-;; summary: Blind batch auction for sBTC/STX swaps at synthetic oracle price
+;; title: blind-premium
+;; version: 0.1.0
+;; summary: Premium batch auction for sBTC/STX swaps with per-depositor limits
 ;; description:
-;;   State-machine cycles: deposit (150 blocks), buffer (30 blocks), then
-;;   open-ended settle window. Cycle advances ONLY on successful settlement.
-;;   If settlement keeps failing, anyone can cancel after CANCEL_THRESHOLD
-;;   blocks, refunding all depositors and advancing the cycle.
+;;   Fork of blind-auction with two changes:
+;;     1. Clearing price = oracle * (1 - PREMIUM_BPS/10000). Premium favors
+;;        the STX side (MMs supplying STX get slightly more sBTC per STX
+;;        than oracle says; sBTC sellers pay the premium). Fixed at 40 bps.
+;;     2. Per-depositor limit prices. Each deposit includes a limit; at
+;;        settlement, depositors whose limit is violated by the clearing
+;;        price are rolled to the next cycle instead of filling at a bad
+;;        price. Limit = 0 means "accept any clearing price".
+;;   The 30-block buffer between close-deposits and settle is removed —
+;;   limit prices + the three price gates (staleness, confidence, DEX)
+;;   make arb games impossible without further cooldown.
+;;   Cycle advances ONLY on successful settlement. If settlement keeps
+;;   failing, anyone can cancel after CANCEL_THRESHOLD blocks, rolling
+;;   all deposits to the next cycle.
 ;;   50 slots per side, larger deposits bump smallest when full.
 ;;   Three safety gates: staleness, confidence, DEX sanity.
 
@@ -23,11 +33,20 @@
 
 ;; Cycle phase thresholds (in blocks, ~2s each)
 (define-constant DEPOSIT_MIN_BLOCKS u150) ;; min 150 blocks before deposits can be closed (~5 min)
-;; Buffer must be >= MAX_STALENESS worth of blocks so that any price
-;; visible during deposit phase is guaranteed stale by settle time.
-;; This prevents depositors from gaming a known settlement price.
-(define-constant BUFFER_BLOCKS u30)       ;; 30 blocks (~60s) >= MAX_STALENESS (60s)
-(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks after closed + buffer = anyone can cancel (~16 min)
+;; No buffer phase in blind-premium: per-depositor limits + the three
+;; oracle safety gates eliminate the price-gaming vector that the buffer
+;; protected against in blind-auction. Depositors commit to a clearing
+;; price bound at deposit time; they can't profit from knowing the
+;; settlement price in advance.
+(define-constant BUFFER_BLOCKS u0)
+(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks after closed = anyone can cancel (~16 min)
+
+;; Premium: 40 bps (0.40%) in favor of the STX side.
+;; Clearing price = oracle * (10000 - PREMIUM_BPS) / 10000
+;; STX depositors get more sBTC per STX than oracle; sBTC depositors
+;; receive less STX per sBTC than oracle. Friedger-style sBTC sellers
+;; pay the premium; STX-side MMs earn it.
+(define-constant PREMIUM_BPS u40)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
@@ -123,6 +142,10 @@
 (define-data-var bumped-stx-principal principal tx-sender)
 (define-data-var bumped-sbtc-principal principal tx-sender)
 
+;; Scratch var: premium-adjusted clearing price, set at the start of
+;; execute-settlement so filter-limit-violating-* helpers can read it.
+(define-data-var settle-clearing-price uint u0)
+
 
 ;; ============================================================================
 ;; Data maps
@@ -135,6 +158,15 @@
 (define-map sbtc-deposits
   { cycle: uint, depositor: principal }
   uint)
+
+;; Per-depositor clearing-price limits. Keyed by principal only — limits
+;; persist across cycles as long as the depositor has funds in the system.
+;; STX side: max STX-per-sBTC the depositor will pay. u0 = no limit.
+;; sBTC side: min STX-per-sBTC the depositor will accept. u0 = no limit.
+;; Both sides use the same 8-decimal precision as oracle-price.
+;; Deleted when the depositor fully exits (cancel, bump, fully filled).
+(define-map stx-deposit-limits principal uint)
+(define-map sbtc-deposit-limits principal uint)
 
 (define-map stx-depositor-list
   uint
@@ -195,6 +227,12 @@
 (define-read-only (get-sbtc-deposit (cycle uint) (depositor principal))
   (default-to u0 (map-get? sbtc-deposits { cycle: cycle, depositor: depositor })))
 
+(define-read-only (get-stx-limit (depositor principal))
+  (default-to u0 (map-get? stx-deposit-limits depositor)))
+
+(define-read-only (get-sbtc-limit (depositor principal))
+  (default-to u0 (map-get? sbtc-deposit-limits depositor)))
+
 (define-read-only (get-stx-depositors (cycle uint))
   (default-to (list) (map-get? stx-depositor-list cycle)))
 
@@ -247,7 +285,8 @@
 ;; Private: Roll helpers (for cancel-cycle)
 ;; ============================================================================
 
-;; Move a depositor's STX deposit from cancelled cycle to next cycle
+;; Move a depositor's STX deposit from cancelled cycle to next cycle.
+;; Limits are keyed by principal and persist automatically — nothing to move.
 (define-private (roll-stx-depositor (depositor principal))
   (let ((cycle (var-get current-cycle)))
     (map-set stx-deposits { cycle: (+ cycle u1), depositor: depositor }
@@ -272,7 +311,10 @@
 ;; Public: Deposits (only during deposit phase)
 ;; ============================================================================
 
-(define-public (deposit-stx (amount uint))
+;; limit-price: max STX-per-sBTC the depositor will accept as clearing
+;; price (8-decimal precision). u0 = no limit. Topping up an existing
+;; deposit overwrites the previous limit.
+(define-public (deposit-stx (amount uint) (limit-price uint))
   (let (
     (cycle (var-get current-cycle))
     (existing (get-stx-deposit cycle tx-sender))
@@ -298,25 +340,30 @@
         (map-set stx-depositor-list cycle
           (unwrap-panic (as-max-len? (append (filter not-eq-bumped-stx depositors) tx-sender) u50)))
         (map-delete stx-deposits { cycle: cycle, depositor: smallest-who })
+        (map-delete stx-deposit-limits smallest-who)
         (map-set stx-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (map-set stx-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-stx: (+ (- (get total-stx totals) smallest-amount) amount) }))
-        (print { event: "deposit-stx", depositor: tx-sender, amount: amount, cycle: cycle,
+        (print { event: "deposit-stx", depositor: tx-sender, amount: amount, limit: limit-price, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
         (ok amount))
       (begin
         (try! (stx-transfer? amount tx-sender current-contract))
         (map-set stx-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
+        (map-set stx-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-stx: (+ (get total-stx totals) amount) }))
         (if (is-eq existing u0)
           (map-set stx-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
-        (print { event: "deposit-stx", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
+        (print { event: "deposit-stx", depositor: tx-sender, amount: (+ existing amount), limit: limit-price, cycle: cycle })
         (ok amount)))))
 
-(define-public (deposit-sbtc (amount uint))
+;; limit-price: min STX-per-sBTC the depositor will accept as clearing
+;; price (8-decimal precision). u0 = no limit.
+(define-public (deposit-sbtc (amount uint) (limit-price uint))
   (let (
     (cycle (var-get current-cycle))
     (existing (get-sbtc-deposit cycle tx-sender))
@@ -343,23 +390,26 @@
         (map-set sbtc-depositor-list cycle
           (unwrap-panic (as-max-len? (append (filter not-eq-bumped-sbtc depositors) tx-sender) u50)))
         (map-delete sbtc-deposits { cycle: cycle, depositor: smallest-who })
+        (map-delete sbtc-deposit-limits smallest-who)
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (map-set sbtc-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, cycle: cycle,
+        (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, limit: limit-price, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
         (ok amount))
       (begin
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer amount tx-sender current-contract none))
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
+        (map-set sbtc-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
         (if (is-eq existing u0)
           (map-set sbtc-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
+        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), limit: limit-price, cycle: cycle })
         (ok amount)))))
 
 ;; Cancel deposit - only during deposit phase of current cycle
@@ -375,6 +425,7 @@
     (try! (as-contract? ((with-stx amount))
       (try! (stx-transfer? amount current-contract caller))))
     (map-delete stx-deposits { cycle: cycle, depositor: caller })
+    (map-delete stx-deposit-limits caller)
     (var-set bumped-stx-principal caller)
     (map-set stx-depositor-list cycle (filter not-eq-bumped-stx (get-stx-depositors cycle)))
     (map-set cycle-totals cycle
@@ -395,12 +446,38 @@
       (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
         transfer amount current-contract caller none))))
     (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
+    (map-delete sbtc-deposit-limits caller)
     (var-set bumped-sbtc-principal caller)
     (map-set sbtc-depositor-list cycle (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
     (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
+
+;; ============================================================================
+;; Public: Update a limit without touching the deposit
+;; ============================================================================
+
+;; Update the caller's STX-side limit price. Caller must have an active
+;; STX deposit in the current cycle. Takes effect at the next settlement.
+;; u0 clears the limit (no ceiling).
+(define-public (set-stx-limit (limit-price uint))
+  (begin
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> (get-stx-deposit (var-get current-cycle) tx-sender) u0)
+              ERR_NOTHING_TO_WITHDRAW)
+    (map-set stx-deposit-limits tx-sender limit-price)
+    (print { event: "set-stx-limit", depositor: tx-sender, limit: limit-price })
+    (ok true)))
+
+(define-public (set-sbtc-limit (limit-price uint))
+  (begin
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> (get-sbtc-deposit (var-get current-cycle) tx-sender) u0)
+              ERR_NOTHING_TO_WITHDRAW)
+    (map-set sbtc-deposit-limits tx-sender limit-price)
+    (print { event: "set-sbtc-limit", depositor: tx-sender, limit: limit-price })
+    (ok true)))
 
 ;; ============================================================================
 ;; Private: Small-share filter (roll depositors below MIN_SHARE_BPS to next cycle)
@@ -464,7 +541,75 @@
       (ok true))))
 
 ;; ============================================================================
-;; Public: Close deposits (transition from deposit to buffer phase)
+;; Private: Limit-violation filter (roll depositors whose limit is not
+;; satisfied by the premium-adjusted clearing price)
+;; ============================================================================
+
+;; STX-side limit semantics: `limit` is the max STX-per-sBTC the depositor
+;; will pay. If clearing-price > limit, roll them to the next cycle.
+;; limit == u0 means no limit (always accept).
+(define-private (filter-limit-violating-stx-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (totals (get-cycle-totals cycle))
+    (amount (get-stx-deposit cycle depositor))
+    (next-cycle (+ cycle u1))
+    (totals-next (get-cycle-totals next-cycle))
+    (limit (get-stx-limit depositor))
+    (clearing (var-get settle-clearing-price))
+  )
+    (if (and (> limit u0) (> clearing limit))
+      (begin
+        (map-set stx-deposits { cycle: next-cycle, depositor: depositor } amount)
+        (map-set stx-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
+        (map-set cycle-totals next-cycle
+          (merge totals-next
+            { total-stx: (+ (get total-stx totals-next) amount) }))
+        (map-delete stx-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-stx-principal depositor)
+        (map-set stx-depositor-list cycle
+          (filter not-eq-bumped-stx (get-stx-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge totals { total-stx: (- (get total-stx totals) amount) }))
+        (print { event: "limit-roll-stx", depositor: depositor, cycle: cycle,
+                 amount: amount, limit: limit, clearing: clearing })
+        (ok true))
+      (ok true))))
+
+;; sBTC-side limit semantics: `limit` is the min STX-per-sBTC the depositor
+;; will accept. If clearing-price < limit, roll them to the next cycle.
+(define-private (filter-limit-violating-sbtc-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (totals (get-cycle-totals cycle))
+    (amount (get-sbtc-deposit cycle depositor))
+    (next-cycle (+ cycle u1))
+    (totals-next (get-cycle-totals next-cycle))
+    (limit (get-sbtc-limit depositor))
+    (clearing (var-get settle-clearing-price))
+  )
+    (if (and (> limit u0) (< clearing limit))
+      (begin
+        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
+        (map-set sbtc-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+        (map-set cycle-totals next-cycle
+          (merge totals-next
+            { total-sbtc: (+ (get total-sbtc totals-next) amount) }))
+        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-sbtc-principal depositor)
+        (map-set sbtc-depositor-list cycle
+          (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
+        (print { event: "limit-roll-sbtc", depositor: depositor, cycle: cycle,
+                 amount: amount, limit: limit, clearing: clearing })
+        (ok true))
+      (ok true))))
+
+;; ============================================================================
+;; Public: Close deposits (transition from deposit to settle phase)
 ;; ============================================================================
 
 ;; Anyone can close deposits after DEPOSIT_MIN_BLOCKS have passed.
@@ -594,28 +739,20 @@
   (stx-feed { price: int, conf: uint, expo: int, ema-price: int,
               ema-conf: uint, publish-time: uint, prev-publish-time: uint }))
   (let (
-    (totals (get-cycle-totals cycle))
-    (total-stx (get total-stx totals))
-    (total-sbtc (get total-sbtc totals))
     (btc-price (to-uint (get price btc-feed)))
     (stx-price (to-uint (get price stx-feed)))
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
     (dex-price (get-dex-price))
-    (stx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
-    (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
-    (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
-    (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
-    (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
-    (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
-    (stx-unfilled (- total-stx stx-clearing))
-    (sbtc-unfilled (- total-sbtc sbtc-clearing))
+    ;; Premium-adjusted clearing price favors the STX side: sBTC sellers
+    ;; receive slightly less STX per sBTC than oracle says.
+    (clearing-price (/ (* oracle-price (- BPS_PRECISION PREMIUM_BPS)) BPS_PRECISION))
+    
+
     (min-freshness (- stacks-block-time MAX_STALENESS))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-    (asserts! (and (>= total-stx (var-get min-stx-deposit))
-                   (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
     (asserts! (> stx-price u0) ERR_ZERO_PRICE)
     ;; Gate 1: Staleness
@@ -625,12 +762,36 @@
     (asserts! (< (get conf btc-feed) (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     (asserts! (< (get conf stx-feed) (/ stx-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     ;; Gate 3: DEX sanity < 10%
-    (asserts! (< (if (> oracle-price dex-price) 
+    (asserts! (< (if (> oracle-price dex-price)
                     (- oracle-price dex-price) (- dex-price oracle-price))
                  (/ oracle-price MAX_DEX_DEVIATION)) ERR_PRICE_DEX_DIVERGENCE)
+
+    ;; Roll depositors whose limits are violated by the clearing price.
+    ;; Clearing price is fixed (depends only on oracle + premium), so a
+    ;; single pass is sufficient — filtering cannot change it.
+    (var-set settle-clearing-price clearing-price)
+    (map filter-limit-violating-stx-depositor (get-stx-depositors cycle))
+    (map filter-limit-violating-sbtc-depositor (get-sbtc-depositors cycle))
+
+    ;; Re-read totals after limit filtering, then compute binding side.
+    (let (
+      (totals (get-cycle-totals cycle))
+      (total-stx (get total-stx totals))
+      (total-sbtc (get total-sbtc totals))
+      (stx-value-of-sbtc (/ (* total-sbtc clearing-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
+      (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
+      (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
+      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) clearing-price)))
+      (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
+      (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
+      (stx-unfilled (- total-stx stx-clearing))
+      (sbtc-unfilled (- total-sbtc sbtc-clearing))
+    )
+    (asserts! (and (>= total-stx (var-get min-stx-deposit))
+                   (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     ;; Record settlement
     (map-set settlements cycle
-      { price: oracle-price,
+      { price: clearing-price,
         stx-cleared: stx-clearing,
         sbtc-cleared: sbtc-clearing,
         stx-fee: stx-fee,
@@ -656,7 +817,8 @@
     (print {
       event: "settlement",
       cycle: cycle,
-      price: oracle-price,
+      oracle-price: oracle-price,
+      clearing-price: clearing-price,
       stx-cleared: stx-clearing,
       sbtc-cleared: sbtc-clearing,
       stx-unfilled: stx-unfilled,
@@ -665,7 +827,7 @@
       sbtc-fee: sbtc-fee,
       binding-side: (if sbtc-is-binding "sbtc" "stx")
     })
-    (ok true)))
+    (ok true)))))
 
 ;; ============================================================================
 ;; Private: Push distribution
@@ -696,7 +858,10 @@
         (map-set stx-depositor-list next-cycle
               (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
         true)
-      true)
+      ;; Fully filled — depositor has no remaining balance, clear their limit.
+      (begin 
+        (map-delete stx-deposit-limits depositor) 
+        true))
     (print {
       event: "distribute-stx-depositor",
       depositor: depositor,
@@ -730,7 +895,10 @@
         (map-set sbtc-depositor-list next-cycle
           (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
         true)
-      true)
+      ;; Fully filled — depositor has no remaining balance, clear their limit.
+      (begin 
+        (map-delete sbtc-deposit-limits depositor) 
+        true))
     (print {
       event: "distribute-sbtc-depositor",
       depositor: depositor,
