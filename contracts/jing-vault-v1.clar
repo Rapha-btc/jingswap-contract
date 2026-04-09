@@ -1,42 +1,54 @@
 ;; jing-vault-v1
-;; Personal vault for conditional execution into Jing Swap (sBTC/STX market).
-;; Each user deploys their own instance.
+;; Personal vault for conditional execution into Jing Swap (blind-premium)
+;; with a Bitflow fallback path. Each user deploys their own instance.
 ;;
 ;; - Owner: deposits/withdraws funds, signs SIP-018 intents off-chain
-;; - Keeper: submits signed intents to execute Jing deposits when price hits
-;; - Funds never leave owner's control except into Jing
+;; - Keeper: submits signed intents (jing-deposit, bitflow-swap) or
+;;           triggers unsigned cancels on Jing on the owner's behalf
+;; - Funds never leave owner's control except into blind-premium,
+;;   into Bitflow's xyk-core-v-1-2 (pinned principals), or back to OWNER
 ;;
 ;; Replay protection: each signed intent's message-hash is consumed in
 ;; `used-pubkey-authorizations` once spent (Pillar pattern). The owner can
-;; have many outstanding intents at once — each is independent.
+;; have many outstanding intents at once -- each is independent and single-shot.
 ;;
 ;; Keepers are off-chain entities paid out-of-band (flat subscription, etc).
 ;; The contract does not track per-intent fees or pro-rata positions.
-
-(use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
-(use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
-(use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
+;;
+;; Price semantics (single unit across both venues):
+;;   limit-price = STX per sBTC, 8-decimal precision (Pyth convention)
+;;   - side="stx"  (spending STX, receiving sBTC):  CEILING (max acceptable)
+;;   - side="sbtc" (spending sBTC, receiving STX):  FLOOR   (min acceptable)
+;;
+;; For Bitflow the vault derives min-out from (amount, limit-price) on-chain.
 
 ;; ---------------------------------------------------------------
 ;; Constants
 ;; ---------------------------------------------------------------
 
 (define-constant OWNER tx-sender)
-(define-constant PRICE_PRECISION u100000000)
-(define-constant MAX_STALENESS u60)
 
-(define-constant BTC_USD_FEED 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43)
-(define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
+;; Precision: Pyth is 8-dec, so limit-price is STX/sBTC * 1e8.
+(define-constant PRICE_PRECISION u100000000)
+;; sBTC is 8-dec (sats), STX is 6-dec (ustx). Conversion factor = 1e2.
+(define-constant DECIMAL_FACTOR u100)
+
+;; Bitflow principals are inlined at the call sites below because
+;; Clarity requires literal principals for contract-call? targets --
+;; constants cannot be used. The sbtc-stx v-1-1 pool has
+;; x = sBTC, y = STX (Bitflow's token-stx-v-1-2 wrapper handles native STX).
+;;   core:    'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2
+;;   pool:    'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
+;;   x-token: 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+;;   y-token: 'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2
 
 (define-constant ERR_NOT_OWNER (err u6001))
 (define-constant ERR_INVALID_SIGNATURE (err u6002))
 (define-constant ERR_REPLAY (err u6003))
 (define-constant ERR_EXPIRED (err u6004))
-(define-constant ERR_CONDITION_NOT_MET (err u6005))
 (define-constant ERR_NO_FUNDS (err u6006))
-(define-constant ERR_ORACLE (err u6007))
 (define-constant ERR_INVALID_SIDE (err u6011))
-(define-constant ERR_STALE_PRICE (err u6012))
+(define-constant ERR_INVALID_PRICE (err u6013))
 
 ;; ---------------------------------------------------------------
 ;; State
@@ -45,10 +57,11 @@
 ;; Owner's compressed pubkey (set once, rotatable)
 (define-data-var owner-pubkey (buff 33) 0x000000000000000000000000000000000000000000000000000000000000000000)
 
-;; Trusted keeper principal — can revoke on the owner's behalf.
+;; Trusted keeper principal -- can cancel Jing deposits and revoke
+;; intents on the owner's behalf.
 (define-data-var keeper (optional principal) none)
 
-;; Replay map — Pillar pattern. Once a message-hash is consumed (executed
+;; Replay map -- Pillar pattern. Once a message-hash is consumed (executed
 ;; or revoked), it cannot be used again.
 (define-map used-pubkey-authorizations (buff 32) (buff 33))
 
@@ -72,27 +85,8 @@
 (define-read-only (is-signature-used (h (buff 32)))
   (is-some (map-get? used-pubkey-authorizations h)))
 
-;; Read stored Pyth prices. Returns the STX-per-BTC ratio and the oldest
-;; of the two feeds' publish-time so the caller can enforce staleness.
-(define-read-only (read-oracle-price)
-  (let (
-    (btc-feed (unwrap! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-      get-price BTC_USD_FEED) ERR_ORACLE))
-    (stx-feed (unwrap! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-      get-price STX_USD_FEED) ERR_ORACLE))
-    (btc-pub (get publish-time btc-feed))
-    (stx-pub (get publish-time stx-feed))
-  )
-    (ok {
-      price: (/ (* (to-uint (get price btc-feed)) PRICE_PRECISION)
-                (to-uint (get price stx-feed))),
-      oldest-publish: (if (< btc-pub stx-pub) btc-pub stx-pub),
-    })))
-
 ;; ---------------------------------------------------------------
-;; Owner-only
+;; Owner-only admin
 ;; ---------------------------------------------------------------
 
 (define-public (set-owner-pubkey (pubkey (buff 33)))
@@ -141,8 +135,8 @@
     (try! (contract-call? .jing-vault-registry log-withdraw "sbtc" amount))
     (ok true)))
 
-;; Cancel a signed execute intent. Callable by owner or the whitelisted
-;; keeper — both are trusted principals. Marks the target hash consumed
+;; Cancel a signed intent. Callable by owner or the whitelisted
+;; keeper -- both are trusted principals. Marks the target hash consumed
 ;; so it can never fire.
 (define-public (revoke-intent (target-hash (buff 32)))
   (begin
@@ -155,116 +149,150 @@
     (ok true)))
 
 ;; ---------------------------------------------------------------
-;; Keeper functions
+;; Trusted-principal Jing cancels (no signature required)
+;; ---------------------------------------------------------------
+;;
+;; Owner or keeper can cancel an in-flight deposit on blind-premium.
+;; Refund lands back in the vault and is then freely eligible for any
+;; pre-signed intent whose balance the vault can now satisfy.
+;; blind-premium only permits cancel during PHASE_DEPOSIT of the current
+;; cycle -- outside that window the underlying call reverts and no state
+;; changes here.
+
+(define-public (cancel-jing-stx)
+  (begin
+    (asserts! (or (is-eq tx-sender OWNER)
+                  (is-eq (some tx-sender) (var-get keeper)))
+              ERR_NOT_OWNER)
+    (try! (as-contract (contract-call? .blind-premium cancel-stx-deposit)))
+    (try! (contract-call? .jing-vault-registry log-cancel "stx"))
+    (ok true)))
+
+(define-public (cancel-jing-sbtc)
+  (begin
+    (asserts! (or (is-eq tx-sender OWNER)
+                  (is-eq (some tx-sender) (var-get keeper)))
+              ERR_NOT_OWNER)
+    (try! (as-contract (contract-call? .blind-premium cancel-sbtc-deposit)))
+    (try! (contract-call? .jing-vault-registry log-cancel "sbtc"))
+    (ok true)))
+
+;; ---------------------------------------------------------------
+;; Signed intents
 ;; ---------------------------------------------------------------
 
-;; Execute against current stored Pyth prices (free path). Asserts freshness.
-(define-public (execute-into-jing
+;; Execute a signed Jing deposit intent on blind-premium. limit-price is
+;; passed through to blind-premium directly (same unit, same precision).
+(define-public (execute-jing-deposit
     (sig (buff 65))
     (side (string-ascii 4))
     (amount uint)
-    (target-price uint)
-    (condition (string-ascii 2))
+    (limit-price uint)
     (auth-id uint)
     (expiry uint))
   (let (
-    (msg-hash (contract-call? .jing-vault-auth build-execute-hash {
-      action: "execute",
+    (msg-hash (contract-call? .jing-vault-auth build-intent-hash {
+      action: "jing-deposit",
       side: side,
       amount: amount,
-      target-price: target-price,
-      condition: condition,
+      limit-price: limit-price,
       auth-id: auth-id,
       expiry: expiry,
     }))
-    (oracle (try! (read-oracle-price)))
   )
-    (asserts! (> (get oldest-publish oracle) (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
-    (try! (run-execute msg-hash sig side amount target-price condition expiry (get price oracle)))
+    (try! (verify-and-consume msg-hash sig expiry))
+    (if (is-eq side "stx")
+      (try! (as-contract? ((with-stx amount))
+        (try! (contract-call? .blind-premium deposit-stx amount limit-price))))
+      (if (is-eq side "sbtc")
+        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
+          (try! (contract-call? .blind-premium deposit-sbtc amount limit-price))))
+        (asserts! false ERR_INVALID_SIDE)))
+    (try! (contract-call? .jing-vault-registry log-jing-deposit
+      msg-hash side amount limit-price))
     (ok msg-hash)))
 
-;; Execute path that first refreshes Pyth from VAAs, then runs the same logic.
-(define-public (execute-into-jing-with-refresh
+;; Execute a signed Bitflow swap intent. min-out is derived on-chain from
+;; (amount, limit-price) so the owner signs a price policy, not a raw
+;; token amount. All Bitflow principals are pinned constants -- no trait
+;; args, no substitution vector.
+(define-public (execute-bitflow-swap
     (sig (buff 65))
     (side (string-ascii 4))
     (amount uint)
-    (target-price uint)
-    (condition (string-ascii 2))
+    (limit-price uint)
     (auth-id uint)
-    (expiry uint)
-    (btc-vaa (buff 8192))
-    (stx-vaa (buff 8192))
-    (pyth-storage <pyth-storage-trait>)
-    (pyth-decoder <pyth-decoder-trait>)
-    (wormhole-core <wormhole-core-trait>))
-  (begin
-    (try! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-      verify-and-update-price-feeds btc-vaa
-      { pyth-storage-contract: pyth-storage,
-        pyth-decoder-contract: pyth-decoder,
-        wormhole-core-contract: wormhole-core }))
-    (try! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-      verify-and-update-price-feeds stx-vaa
-      { pyth-storage-contract: pyth-storage,
-        pyth-decoder-contract: pyth-decoder,
-        wormhole-core-contract: wormhole-core }))
-    (let (
-      (msg-hash (contract-call? .jing-vault-auth build-execute-hash {
-        action: "execute",
-        side: side,
-        amount: amount,
-        target-price: target-price,
-        condition: condition,
-        auth-id: auth-id,
-        expiry: expiry,
-      }))
-      (oracle (try! (read-oracle-price)))
-    )
-      (asserts! (> (get oldest-publish oracle) (- stacks-block-time MAX_STALENESS)) ERR_STALE_PRICE)
-      (try! (run-execute msg-hash sig side amount target-price condition expiry (get price oracle)))
-      (ok msg-hash))))
+    (expiry uint))
+  (let (
+    (msg-hash (contract-call? .jing-vault-auth build-intent-hash {
+      action: "bitflow-swap",
+      side: side,
+      amount: amount,
+      limit-price: limit-price,
+      auth-id: auth-id,
+      expiry: expiry,
+    }))
+    (min-out (derive-min-out side amount limit-price))
+  )
+    (asserts! (> limit-price u0) ERR_INVALID_PRICE)
+    (try! (verify-and-consume msg-hash sig expiry))
+    ;; side = "stx"  -> spending STX (y), receiving sBTC (x) -> swap-y-for-x
+    ;; side = "sbtc" -> spending sBTC (x), receiving STX (y) -> swap-x-for-y
+    (if (is-eq side "stx")
+      (try! (as-contract? ((with-stx amount))
+        (try! (contract-call?
+          'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2
+          swap-y-for-x
+          'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
+          'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+          'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2
+          amount min-out))))
+      (if (is-eq side "sbtc")
+        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
+          (try! (contract-call?
+            'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2
+            swap-x-for-y
+            'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
+            'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+            'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2
+            amount min-out))))
+        (asserts! false ERR_INVALID_SIDE)))
+    (try! (contract-call? .jing-vault-registry log-bitflow-swap
+      msg-hash side amount limit-price min-out))
+    (ok msg-hash)))
 
 ;; ---------------------------------------------------------------
 ;; Internal helpers
 ;; ---------------------------------------------------------------
 
-(define-private (run-execute
+(define-private (verify-and-consume
     (msg-hash (buff 32))
     (sig (buff 65))
-    (side (string-ascii 4))
-    (amount uint)
-    (target-price uint)
-    (condition (string-ascii 2))
-    (expiry uint)
-    (oracle-price uint))
+    (expiry uint))
   (let (
     (signer (unwrap! (secp256k1-recover? msg-hash sig) ERR_INVALID_SIGNATURE))
   )
     (asserts! (is-eq signer (var-get owner-pubkey)) ERR_INVALID_SIGNATURE)
     (asserts! (is-none (map-get? used-pubkey-authorizations msg-hash)) ERR_REPLAY)
     (asserts! (or (is-eq expiry u0) (< stacks-block-height expiry)) ERR_EXPIRED)
-    (asserts! (check-condition oracle-price target-price condition) ERR_CONDITION_NOT_MET)
     (map-set used-pubkey-authorizations msg-hash signer)
-
-    ;; Perform the deposit — underlying transfers error natively on
-    ;; insufficient balance.
-    (if (is-eq side "stx")
-      (try! (as-contract? ((with-stx amount))
-        (try! (contract-call? .blind-auction deposit-stx amount))))
-      (if (is-eq side "sbtc")
-        (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
-          (try! (contract-call? .blind-auction deposit-sbtc amount))))
-        (asserts! false ERR_INVALID_SIDE)))
-
-    (try! (contract-call? .jing-vault-registry log-execute
-      msg-hash side amount target-price condition oracle-price))
     (ok true)))
 
-(define-private (check-condition (oracle-price uint) (target uint) (cond (string-ascii 2)))
-  (if (is-eq cond "le")
-    (<= oracle-price target)
-    (if (is-eq cond "ge")
-      (>= oracle-price target)
-      false)))
+;; Derive Bitflow min-out from (amount, limit-price).
+;;
+;; limit-price = STX_per_sBTC * 1e8 (PRICE_PRECISION)
+;; sBTC is 8-dec (sats), STX is 6-dec (ustx), DECIMAL_FACTOR = 1e8/1e6 = 100
+;;
+;; side="stx"  (spending A ustx, want >= M sats):
+;;   M = A * (PRICE_PRECISION * DECIMAL_FACTOR) / limit-price
+;; side="sbtc" (spending A sats, want >= M ustx):
+;;   M = A * limit-price / (PRICE_PRECISION * DECIMAL_FACTOR)
+(define-private (derive-min-out
+    (side (string-ascii 4))
+    (amount uint)
+    (limit-price uint))
+  (if (is-eq side "stx")
+    (/ (* amount (* PRICE_PRECISION DECIMAL_FACTOR)) limit-price)
+    (if (is-eq side "sbtc")
+      (/ (* amount limit-price) (* PRICE_PRECISION DECIMAL_FACTOR))
+      u0)))

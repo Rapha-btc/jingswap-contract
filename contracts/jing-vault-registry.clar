@@ -77,23 +77,42 @@
     (print { event: "vault-revoke", vault: contract-caller,target-hash: target-hash })
     (ok true)))
 
-(define-public (log-execute
+(define-public (log-cancel (asset (string-ascii 4)))
+  (begin
+    (print { event: "vault-cancel", vault: contract-caller, asset: asset })
+    (ok true)))
+
+(define-public (log-jing-deposit
     (msg-hash (buff 32))
     (side (string-ascii 4))
     (amount uint)
-    (target-price uint)
-    (condition (string-ascii 2))
-    (oracle-price uint))
+    (limit-price uint))
   (begin
     (print {
-      event: "vault-execute",
+      event: "vault-jing-deposit",
       vault: contract-caller,
       msg-hash: msg-hash,
       side: side,
       amount: amount,
-      target-price: target-price,
-      condition: condition,
-      oracle-price: oracle-price,
+      limit-price: limit-price,
+    })
+    (ok true)))
+
+(define-public (log-bitflow-swap
+    (msg-hash (buff 32))
+    (side (string-ascii 4))
+    (amount uint)
+    (limit-price uint)
+    (min-out uint))
+  (begin
+    (print {
+      event: "vault-bitflow-swap",
+      vault: contract-caller,
+      msg-hash: msg-hash,
+      side: side,
+      amount: amount,
+      limit-price: limit-price,
+      min-out: min-out,
     })
     (ok true)))
 
