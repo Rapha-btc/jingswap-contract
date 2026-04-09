@@ -58,6 +58,45 @@
     (print { event: "vault-unregistered", owner: tx-sender, vault: vault })
     (ok true)))
 
+;; Activity log endpoints — called by vaults. Each emits a print with
+;; `vault` (contract-caller) captured natively,
+;; so vaults never pass the vault principal as a param.
+
+(define-public (log-deposit (asset (string-ascii 4)) (amount uint))
+  (begin
+    (print { event: "vault-deposit", vault: contract-caller,asset: asset, amount: amount })
+    (ok true)))
+
+(define-public (log-withdraw (asset (string-ascii 4)) (amount uint))
+  (begin
+    (print { event: "vault-withdraw", vault: contract-caller,asset: asset, amount: amount })
+    (ok true)))
+
+(define-public (log-revoke (target-hash (buff 32)))
+  (begin
+    (print { event: "vault-revoke", vault: contract-caller,target-hash: target-hash })
+    (ok true)))
+
+(define-public (log-execute
+    (msg-hash (buff 32))
+    (side (string-ascii 4))
+    (amount uint)
+    (target-price uint)
+    (condition (string-ascii 2))
+    (oracle-price uint))
+  (begin
+    (print {
+      event: "vault-execute",
+      vault: contract-caller,
+      msg-hash: msg-hash,
+      side: side,
+      amount: amount,
+      target-price: target-price,
+      condition: condition,
+      oracle-price: oracle-price,
+    })
+    (ok true)))
+
 ;; Admin transfer
 
 (define-public (set-contract-owner (new-owner principal))

@@ -10,14 +10,16 @@
     chain-id: chain-id,
   }))))
 
-;; Execute intent: deposit vault funds into Jing when price condition is met
+;; Execute intent: deposit a specific `amount` from the vault into Jing
+;; when the price condition is met. `auth-id` is uniqueness salt (e.g.
+;; Date.now() in ms) — replay protection is by message-hash, not nonce.
 (define-read-only (build-execute-hash (details {
   action: (string-ascii 8),
   side: (string-ascii 4),
+  amount: uint,
   target-price: uint,
   condition: (string-ascii 2),
-  nonce: uint,
-  keeper-fee-bps: uint,
+  auth-id: uint,
   expiry: uint,
 }))
   (sha256 (concat SIP018_MSG_PREFIX
@@ -25,23 +27,9 @@
       (sha256 (unwrap-panic (to-consensus-buff? {
         action: (get action details),
         side: (get side details),
+        amount: (get amount details),
         target-price: (get target-price details),
         condition: (get condition details),
-        nonce: (get nonce details),
-        keeper-fee-bps: (get keeper-fee-bps details),
-        expiry: (get expiry details),
-      })))))))
-
-;; Retract intent: cancel vault's deposit from Jing
-(define-read-only (build-retract-hash (details {
-  action: (string-ascii 8),
-  nonce: uint,
-  expiry: uint,
-}))
-  (sha256 (concat SIP018_MSG_PREFIX
-    (concat (get-domain-hash)
-      (sha256 (unwrap-panic (to-consensus-buff? {
-        action: (get action details),
-        nonce: (get nonce details),
+        auth-id: (get auth-id details),
         expiry: (get expiry details),
       })))))))
