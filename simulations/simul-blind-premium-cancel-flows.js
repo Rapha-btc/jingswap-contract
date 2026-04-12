@@ -140,6 +140,10 @@ async function main() {
       function_args: [uintCV(SBTC_100K), uintCV(LIMIT_SBTC)],
     })
 
+    // Fund STX_USER_2 before depositing
+    .withSender(STX_USER)
+    .addSTXTransfer({ recipient: STX_USER_2, amount: STX_100 })
+
     // Also deposit from STX_USER_2
     .withSender(STX_USER_2)
     .addContractCall({
