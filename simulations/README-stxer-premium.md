@@ -240,19 +240,65 @@ Stxer link: https://stxer.xyz/simulations/mainnet/f8f5667020981db3744579821ebc96
 
 Ported from `simul-settle-refresh.js` with added Part B testing `close-and-settle-with-refresh`. Uses real `MAX_STALENESS u80` (not the relaxed stxer value) and fetches a live Pyth VAA from Hermes.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| A1 | Deploy (real staleness, zeroed blocks) | ok |
-| A2 | Deposit 100 STX + 100k sats | ok |
-| A3 | Close deposits | ok |
-| A4 | Try settle (stored prices) | ERR_STALE_PRICE (u1005) |
-| A5 | settle-with-refresh (fresh VAA) | ok |
-| A6 | Read settlement | price = oracle * 0.998 |
-| B1 | Deposit into cycle 1 | ok |
-| B2 | close-and-settle-with-refresh (bundled) | ok, one tx |
-| B3 | Verify cycle advanced to 2 | cycle = 2 |
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Deploy (real MAX_STALENESS u80, zeroed blocks) | ok |
+| 2 | Deposit 100 STX (permissive limit) | ok |
+| 3 | Deposit 100k sats (permissive limit) | ok |
+| 4 | Close deposits | ok |
+| 5 | Phase | u2 (SETTLE) |
+| 6 | settle (stored prices) | **(err u1005)** ERR_STALE_PRICE ✓ |
+| 7 | settle-with-refresh (fresh VAA) | ok, see below |
+| 8 | Settlement record | price=33494932248938 |
+| 9 | Cycle | u1 |
+| 10 | Phase | u0 (DEPOSIT) |
+| 11 | DEX price | 33,271,382,492,360 |
+| 12 | Deposit 100 STX in cycle 1 | ok |
+| 13 | Deposit 100k sats in cycle 1 | ok (total=170,145 incl. 70,145 rolled) |
+| 14 | **close-and-settle-with-refresh** (bundled) | **ok, one tx** ✓ |
+| 15 | Settlement record cycle 1 | price=33494932248938 |
+| 16 | Cycle | u2 |
+| 17 | Cycle 2 totals | (sbtc:140,290, stx:0) |
 
-**Results:** _TBD_
+**Results: ALL GREEN (17/17 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/d72ce9d43bc80d9ffb50ca1de2caa110
+
+**Part A: settle-with-refresh (separate close + settle)**
+
+Pyth prices refreshed via VAA: BTC=$71,790.52, STX=$0.2139
+
+| Field | Value |
+|-------|-------|
+| oracle-price | 33,562,056,361,662 |
+| clearing-price | 33,494,932,248,938 |
+| premium check | 33,562,056,361,662 * 9980/10000 = 33,494,932,248,938 ✓ |
+| stx-cleared | 100,000,000 (100%) |
+| sbtc-cleared | 29,855 sats |
+| sbtc-unfilled | 70,145 sats → rolled to cycle 1 |
+
+- `settle` correctly fails with ERR_STALE_PRICE (u1005) when stored Pyth prices exceed MAX_STALENESS u80 ✓
+- `settle-with-refresh` succeeds with fresh VAA ✓
+- Runtime: ~122.7M (well within Clarity budget)
+
+**Part B: close-and-settle-with-refresh (bundled, one tx)**
+
+Step 14 event log shows both operations in sequence:
+1. `close-deposits` event (cycle 1, closed-at-block=7568794)
+2. Settlement event (same clearing price, same oracle)
+
+- sBTC in cycle 1: 170,145 sats (100k fresh + 70,145 rolled from cycle 0)
+- sbtc-cleared: 29,855 sats, sbtc-unfilled: 140,290 → rolled to cycle 2
+- Runtime: ~122.7M (essentially same as separate settle-with-refresh)
+- Cycle advanced to 2 ✓
+
+**Key verifications:**
+- `settle` rejects stale stored prices with ERR_STALE_PRICE when MAX_STALENESS=80 ✓
+- `settle-with-refresh` passes staleness gate with fresh Pyth VAA ✓
+- `close-and-settle-with-refresh` bundles both operations atomically in one tx ✓
+- Bundled runtime (~122.7M) is essentially identical to separate settle-with-refresh ✓
+- Rolled sBTC from cycle 0 accumulates with fresh deposits in cycle 1 ✓
+- Pyth refresh fee: 2 uSTX paid to Pyth deployer ✓
 
 ---
 
