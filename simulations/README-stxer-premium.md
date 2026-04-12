@@ -82,8 +82,9 @@ Ported from `simul-cancel-flows.js`. Tests cancel-deposit, wrong-phase cancels, 
 | 12 | Cancel again (nothing) | (err u1008) ERR_NOTHING_TO_WITHDRAW |
 | 13 | Re-deposit STX 100 | ok |
 | 14 | Re-deposit sBTC 100k | ok |
-| 15 | STX_USER_2 deposit 50 STX | **(err u1)** -- unfunded address, test gap |
-| 16 | Close deposits | ok |
+| 15 | Fund STX_USER_2 with 100 STX | ok |
+| 16 | STX_USER_2 deposit 50 STX | ok |
+| 17 | Close deposits | ok |
 | 17 | Phase | u2 (SETTLE) |
 | 18 | Cancel STX during settle | (err u1002) ERR_NOT_DEPOSIT_PHASE |
 | 19 | Cancel sBTC during settle | (err u1002) ERR_NOT_DEPOSIT_PHASE |
@@ -102,9 +103,9 @@ Ported from `simul-cancel-flows.js`. Tests cancel-deposit, wrong-phase cancels, 
 | 34 | Cancel rolled sBTC in cycle 1 | ok, 100k sats refunded |
 | 35-37 | Final state | cycle 1 totals=(0,0), both lists empty |
 
-**Results: 36/37 GREEN** (step 15 failed: STX_USER_2 unfunded on mainnet -- test gap, not contract bug)
+**Results: ALL GREEN (38/38 steps)**
 
-Stxer link: https://stxer.xyz/simulations/mainnet/d99b175a4b2b1dda2a870a4629cefecf
+Stxer link: https://stxer.xyz/simulations/mainnet/a86a493f41a05fc634e831318a001b90
 
 **Key verifications:**
 - Limits cleared on cancel (steps 10-11) ✓
@@ -113,7 +114,7 @@ Stxer link: https://stxer.xyz/simulations/mainnet/d99b175a4b2b1dda2a870a4629cefe
 - Cancel-cycle rolls deposits + depositor lists to next cycle (steps 24-29) ✓
 - Rolled deposits can be cancelled in the new cycle (steps 33-34) ✓
 
-**Note:** Step 15 should fund STX_USER_2 before depositing. This was also an issue in the blind-auction cancel-flows simulation.
+**Note:** STX_USER_2 is funded via STX transfer before depositing (step 15). The original blind-auction cancel-flows had the same gap.
 
 ---
 
