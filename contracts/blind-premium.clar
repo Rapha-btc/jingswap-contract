@@ -6,10 +6,10 @@
 ;;     1. Clearing price = oracle * (1 - PREMIUM_BPS/10000). Premium favors
 ;;        the STX side (MMs supplying STX get slightly more sBTC per STX
 ;;        than oracle says; sBTC sellers pay the premium). Fixed at 20 bps.
-;;     2. Per-depositor limit prices. Each deposit includes a limit; at
-;;        settlement, depositors whose limit is violated by the clearing
+;;     2. Per-depositor limit prices. Each deposit includes a limit > 0;
+;;        at settlement, depositors whose limit is violated by the clearing
 ;;        price are rolled to the next cycle instead of filling at a bad
-;;        price. Limit = 0 means "accept any clearing price".
+;;        price. u0 limits are rejected at deposit/set-limit time.
 ;;   The 30-block buffer between close-deposits and settle is removed to
 ;;   enable atomic composability: other protocols (Bitflow, Velar, routers)
 ;;   can bundle deposit + close + settle in a single tx, making Jing an
@@ -113,6 +113,7 @@
 (define-constant ERR_CANCEL_TOO_EARLY (err u1014))
 (define-constant ERR_CLOSE_TOO_EARLY (err u1015))
 (define-constant ERR_ALREADY_CLOSED (err u1016))
+(define-constant ERR_LIMIT_REQUIRED (err u1017))
 
 ;; ============================================================================
 ;; Data vars
@@ -171,8 +172,8 @@
 
 ;; Per-depositor clearing-price limits. Keyed by principal only -- limits
 ;; persist across cycles as long as the depositor has funds in the system.
-;; STX side: max STX-per-sBTC the depositor will pay. u0 = no limit.
-;; sBTC side: min STX-per-sBTC the depositor will accept. u0 = no limit.
+;; STX side: max STX-per-sBTC the depositor will pay. Must be > 0.
+;; sBTC side: min STX-per-sBTC the depositor will accept. Must be > 0.
 ;; Both sides use the same 8-decimal precision as oracle-price.
 ;; Deleted when the depositor fully exits (cancel, bump, fully filled).
 (define-map stx-deposit-limits principal uint)
@@ -319,7 +320,8 @@
 ;; ============================================================================
 
 ;; limit-price: max STX-per-sBTC the depositor will accept as clearing
-;; price (8-decimal precision). u0 = no limit. Topping up an existing
+;; price (8-decimal precision). MUST be > 0 -- u0 is rejected so every
+;; depositor has an explicit price ceiling. Topping up an existing
 ;; deposit overwrites the previous limit.
 (define-public (deposit-stx (amount uint) (limit-price uint))
   (let (
@@ -331,6 +333,7 @@
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-stx-deposit)) ERR_DEPOSIT_TOO_SMALL)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
 
     (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
       (let (
@@ -369,7 +372,8 @@
         (ok amount)))))
 
 ;; limit-price: min STX-per-sBTC the depositor will accept as clearing
-;; price (8-decimal precision). u0 = no limit.
+;; price (8-decimal precision). MUST be > 0 -- u0 is rejected so every
+;; depositor has an explicit price floor.
 (define-public (deposit-sbtc (amount uint) (limit-price uint))
   (let (
     (cycle (var-get current-cycle))
@@ -380,6 +384,7 @@
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-sbtc-deposit)) ERR_DEPOSIT_TOO_SMALL)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
     (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
       (let (
         (smallest-info (fold find-smallest-sbtc-fold depositors
@@ -467,10 +472,12 @@
 
 ;; Update the caller's STX-side limit price. Caller must have an active
 ;; STX deposit in the current cycle. Takes effect at the next settlement.
-;; u0 clears the limit (no ceiling).
+;; MUST be > 0 -- u0 is rejected. Depositors who want to exit should use
+;; cancel-stx-deposit instead of clearing their limit.
 (define-public (set-stx-limit (limit-price uint))
   (begin
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
     (asserts! (> (get-stx-deposit (var-get current-cycle) tx-sender) u0)
               ERR_NOTHING_TO_WITHDRAW)
     (map-set stx-deposit-limits tx-sender limit-price)
@@ -480,6 +487,7 @@
 (define-public (set-sbtc-limit (limit-price uint))
   (begin
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
     (asserts! (> (get-sbtc-deposit (var-get current-cycle) tx-sender) u0)
               ERR_NOTHING_TO_WITHDRAW)
     (map-set sbtc-deposit-limits tx-sender limit-price)
@@ -554,7 +562,7 @@
 
 ;; STX-side limit semantics: `limit` is the max STX-per-sBTC the depositor
 ;; will pay. If clearing-price > limit, roll them to the next cycle.
-;; limit == u0 means no limit (always accept).
+;; Input validation guarantees limit > u0 at deposit/set-limit time.
 (define-private (filter-limit-violating-stx-depositor (depositor principal))
   (let (
     (cycle (var-get current-cycle))
@@ -565,7 +573,7 @@
     (limit (get-stx-limit depositor))
     (clearing (var-get settle-clearing-price))
   )
-    (if (and (> limit u0) (> clearing limit))
+    (if (> clearing limit)
       (begin
         (map-set stx-deposits { cycle: next-cycle, depositor: depositor } amount)
         (map-set stx-depositor-list next-cycle
@@ -596,7 +604,7 @@
     (limit (get-sbtc-limit depositor))
     (clearing (var-get settle-clearing-price))
   )
-    (if (and (> limit u0) (< clearing limit))
+    (if (< clearing limit)
       (begin
         (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
         (map-set sbtc-depositor-list next-cycle
