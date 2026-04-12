@@ -6,10 +6,10 @@ This doc explains the intentional design choices in `blind-premium.clar` that de
 
 1. **No buffer between `close-deposits` and `settle`** — enables atomic composability with routers and other protocols.
 2. **Mandatory non-zero limit prices on every deposit** — shifts responsibility for price tolerance onto the depositor.
-3. **60s oracle freshness window, no tighter** — trusts Pyth's staleness ceiling as sufficient even under network congestion, relying on limits as the user-level safety net.
-4. **Shortened cycle thresholds** (`DEPOSIT_MIN_BLOCKS u30`, `CANCEL_THRESHOLD u150`) — ~1 min min deposit window, ~5 min to cancel a stuck cycle.
+3. **80s oracle freshness window** — enough headroom for bundled close+settle to land, tighter than Zest v2's 120s, with limits as the user-level safety net. Kept as a constant, not a data-var.
+4. **Shortened cycle thresholds** (`DEPOSIT_MIN_BLOCKS u10`, `CANCEL_THRESHOLD u42`) — ~70s min deposit window at ~7s/block, ~5 min to cancel a stuck cycle.
 5. **20 bps premium** (down from 40 bps in an earlier draft) — narrower MM spread for more competitive clearing.
-6. **Keep the core contract lean — no native `deposit+close+settle` bundling** — wrapper contracts should compose publics, per Werner's "build as light as possible" guidance.
+6. **Bundled `close-and-settle-with-refresh`** — the natural happy path (close + settle in one tx) is exposed natively; `deposit+close+settle` bundling is left to wrapper contracts.
 
 The rest of this document is one section per decision.
 
@@ -116,41 +116,57 @@ The asymmetry is a latent footgun against future refactors, not an active concer
 
 ---
 
-## 3. 60s oracle freshness window, even under network congestion
+## 3. 80s oracle freshness window (constant, not adjustable)
 
-`MAX_STALENESS u60` (60 seconds for Pyth publish time). We do NOT tighten this further, and we do not add any "settle must be within N blocks of oracle publish" constraint on top.
+`MAX_STALENESS u80` (80 seconds for Pyth publish time). This is a `define-constant`, not a `define-data-var`.
 
-### The trade-off
+### Why 80s
 
-The alternative would be tighter freshness — say 15s — which would reduce the worst-case oracle drift exposure. But under Stacks network congestion, block propagation can slow; a 15s freshness window combined with a 4–5s block time leaves a narrow execution margin. During congestion events, `settle-with-refresh` would start failing on otherwise-valid oracle reads, forcing cycles to drag to cancel and roll forward repeatedly. That's worse UX than accepting slightly-stale fills.
+The primary driver is the bundled `close-and-settle-with-refresh` function (decision 6). After a deposit phase of at least 10 blocks (~70s at ~7s/block), the caller fetches a fresh Pyth VAA off-chain and submits the bundle. The VAA's publish-time must be within 80s of the block's timestamp when the tx lands. At ~7s block times, the caller has ~11 blocks of headroom between fetching the VAA and the tx landing — comfortable for normal conditions and enough buffer for 1–2 congested blocks.
 
-### Why 60s is safe enough
+Comparison: Zest v2 uses `u120` (120 seconds) for Pyth feeds on their lending market, where stale prices create insolvency risk via bad liquidations. Jing's batch auction is lower-stakes — a stale clearing price just rolls limit-violating depositors instead of creating bad debt. So 80s is tighter than Zest while being more generous than 60s.
 
-The user-level safety net is **the mandatory limit price** (decision 2). If the oracle is 60s stale and the market has moved, one of two things happens:
+### Why not tighter (e.g. 15s)
 
-1. The market moved **against** the depositor: their limit is violated by the clearing price computed from the stale oracle → they are rolled to the next cycle untouched. They are not harmed.
+Under Stacks network congestion, block propagation can slow. A 15s freshness window combined with ~7s block times leaves a razor-thin execution margin. During congestion events, `settle-with-refresh` and the bundled function would start failing on otherwise-valid oracle reads, forcing cycles to drag to cancel and roll forward repeatedly. That's worse UX than accepting slightly-stale fills.
+
+### Why limits make 80s safe
+
+The user-level safety net is **the mandatory limit price** (decision 2). If the oracle is 80s stale and the market has moved:
+
+1. The market moved **against** the depositor: their limit is violated by the clearing price computed from the stale oracle -- they are rolled to the next cycle untouched. Not harmed.
 2. The market moved **in favor** of the depositor: their limit is still satisfied, they fill. No harm either.
-
-The limit price is what makes 60s acceptable. Without limits, a 60s stale oracle could fill a user at a 2–3% worse price than live market during volatile events. With limits, the user's personal risk cap is enforced regardless of how stale or congested the oracle path becomes.
 
 This is a key reason decisions 2 and 3 are linked: **limits are what let us stop worrying about oracle freshness in the execution path**. The contract trusts Pyth's staleness ceiling and trusts each depositor's chosen limit, and that combination handles the entire class of "settlement fires when external markets have moved" issues.
 
+### Why a constant, not a data-var
+
+Zest v2 uses per-asset `max-staleness` set via governance proposals. We use a global constant instead. Reasons:
+
+1. **Predictability.** Users and integrators can inspect the constant and know the freshness guarantee will never change without a new contract deployment. No admin can silently widen the window.
+2. **Simpler trust model.** A data-var adds an admin key that can change the staleness threshold. For a lending protocol with governance this is manageable; for a batch auction where users commit limit-bounded deposits, the simpler trust story is "the contract is the contract."
+3. **If 80s proves wrong in practice**, cycles will fail and get cancelled -- users are rolled, not harmed. The fix is deploying a new contract version with an updated constant, not an admin tx that nobody notices.
+
 ### Network congestion is not our problem to solve
 
-If Stacks is congested to the point where oracle publishes can't land within 60s, the entire protocol is degraded — not just Jing. There's nothing a contract can do about that; the mitigation is at the infrastructure layer. What the contract *can* do is ensure that in the worst case, honest users are protected, and limits do exactly that.
+If Stacks is congested to the point where oracle publishes can't land within 80s, the entire protocol is degraded -- not just Jing. There's nothing a contract can do about that; the mitigation is at the infrastructure layer. What the contract *can* do is ensure that in the worst case, honest users are protected, and limits do exactly that.
 
 ---
 
 ## 4. Shortened cycle thresholds
 
-- `DEPOSIT_MIN_BLOCKS u30` (was `u150`) — minimum blocks before `close-deposits` can be called. ~1 min at ~2s/block, down from ~5 min.
-- `CANCEL_THRESHOLD u150` (was `u500`) — blocks after `close-deposits` before anyone can call `cancel-cycle`. ~5 min, down from ~16 min.
+- `DEPOSIT_MIN_BLOCKS u10` (was `u150`) -- minimum blocks before `close-deposits` can be called. ~70s at ~7s/block (Nakamoto average), down from ~17.5 min.
+- `CANCEL_THRESHOLD u42` (was `u500`) -- blocks after `close-deposits` before anyone can call `cancel-cycle`. ~5 min at ~7s/block, down from ~58 min.
+
+Note: Nakamoto block times average ~6.8-7.1s, not the ~2s sometimes cited. All timing estimates use ~7s/block.
 
 ### Why
 
-Faster cycles = more liquidity turnover for MMs, more frequent fills for users, less time for oracle drift to accumulate mid-cycle. The original longer windows were conservative defaults copied from the blind-auction template but have no specific safety role in a mandatory-limit design — if anything goes wrong, the safety net (limits + oracle gates) kicks in regardless of how long the deposit window was.
+Faster cycles = more liquidity turnover for MMs, more frequent fills for users, less time for oracle drift to accumulate mid-cycle. The original longer windows were conservative defaults copied from the blind-auction template but have no specific safety role in a mandatory-limit design -- if anything goes wrong, the safety net (limits + oracle gates) kicks in regardless of how long the deposit window was.
 
-The ~1 min deposit window is long enough for multiple depositors to coordinate into a batch without being so long that inventory sits idle. The ~5 min cancel window is long enough that transient oracle-gate failures (a single bad Pyth update) don't force premature cancellation, but short enough that a genuinely stuck cycle doesn't lock funds for long.
+`DEPOSIT_MIN_BLOCKS u10` is a **floor**, not a target. The ~70s window is long enough for users to see the cycle, deposit, and cancel if they change their mind. Keepers or MM bots can wait longer before calling `close-deposits` if they want more deposits to accumulate -- the constant just sets the earliest possible close.
+
+`CANCEL_THRESHOLD u42` (~5 min) is long enough that transient oracle-gate failures (a single bad Pyth update, a momentary DEX divergence spike) don't force premature cancellation, but short enough that a genuinely stuck cycle doesn't lock funds for long.
 
 ---
 
@@ -164,39 +180,50 @@ Dropping from 40 bps to 20 bps also makes JIT arbs less profitable for a given d
 
 ---
 
-## 6. Keep the core lean — no native `deposit+close+settle` bundling
+## 6. Bundled `close-and-settle-with-refresh`, but no `deposit+close+settle`
 
-The contract exposes `deposit-stx`, `deposit-sbtc`, `close-deposits`, `settle`, and `settle-with-refresh` as separate publics. It does NOT expose a bundled `deposit-and-settle` function. Routers, MM bots, and integrating protocols compose the separate publics via `contract-call?` in a wrapper contract.
+The contract exposes `close-and-settle-with-refresh` as a native public that calls `close-deposits` then `settle-with-refresh` in one tx. This is the natural happy path: deposits accumulate during the deposit phase, then someone triggers the bundled close+settle.
 
-### Rationale
+The function is thin -- it just chains the two existing publics:
 
-Werner's "build as light as possible" guidance applies directly. `settle-with-refresh` is already the heaviest operation in the contract (Pyth VAA verification, DEX price read, depositor iteration, limit filtering, settlement map updates, fee transfers, distribution loops). Adding `close-deposits` logic inline would push runtime cost closer to the Clarity budget ceiling and reduce headroom for future additions (more depositor slots, additional gates, etc.).
+```clarity
+(define-public (close-and-settle-with-refresh ...)
+  (begin
+    (try! (close-deposits))
+    (try! (settle-with-refresh ...))
+    (ok true)))
+```
 
-Composing the separate publics in a wrapper contract via `contract-call?` adds essentially zero runtime cost — each public call is already a separate stack frame, and Clarity's execution model handles the sequencing cleanly. The bundling belongs at the wrapper layer, where it can also include additional legs (a Bitflow swap, a Velar leg, a router settlement) that the core contract should not know about.
+### Why bundle close+settle but not deposit+close+settle
 
-Concrete benefits of staying lean:
+Calling close is almost always immediately followed by settle -- there's no reason to close and NOT settle. Bundling saves a tx and makes the UX simpler for keepers and bots.
 
-- **Smaller audit surface.** Fewer public functions, less code to review, fewer ways for the contract to be misused.
-- **Runtime headroom.** `settle-with-refresh` needs to leave enough budget for gate checks, filtering, distribution, and future iteration growth. Every extra op in the core contract eats that margin.
-- **Composability flexibility.** A wrapper can bundle close+settle with any combination of other protocol calls; a native bundled function locks you into one specific composition pattern.
+Deposit is a separate concern: it belongs to a different phase and a different actor (the depositor vs the settle-caller). Bundling deposit into the same function would add runtime cost (deposit involves queue management, bump logic, limit validation) to an already-heavy path, and would serve a narrow use case (JIT arbs who want everything atomic). Routers and JIT arbs who want deposit+close+settle can compose the publics via `contract-call?` in a wrapper contract -- the runtime cost of chaining is negligible.
 
-### Who writes the wrapper?
+### Why not a bundled `close-and-settle` (no refresh)?
 
-Anyone who needs the atomic bundle. The jing team can ship a canonical wrapper alongside the core contract, but it's a separate artifact, not part of `blind-premium.clar`. External integrators (aggregators, router protocols) will write their own wrappers tuned to their specific routing logic.
+After a deposit phase of at least 10 blocks (~70s), stored Pyth prices are almost certainly stale. `close-and-settle` (without refresh) would fail on the `MAX_STALENESS u80` gate nearly every time. The rare case where stored prices happen to be fresh enough is not worth a dedicated public function -- users can call `close-deposits` + `settle` separately for that path.
+
+### Core stays lean where it matters
+
+Werner's "build as light as possible" guidance still applies to the heavy path. The bundled function adds zero runtime overhead beyond a function call frame -- it's the same ops as calling both publics separately. The core contract does not bundle deposit+close+settle, deposit+settle, or any multi-venue routing logic. Those compositions belong in wrapper contracts where integrators can add their own legs (Bitflow, Velar, slippage checks, fee splits).
 
 ---
 
 ## What we are NOT defending against
 
-- **Oracle staleness within the 60s Pyth window**: see decision 3. Limits handle this.
+- **Oracle staleness within the 80s Pyth window**: see decision 3. Limits handle this.
 - **Honest users' counterfactual loss vs external venues**: a user who chose oracle-based pricing accepts that the clearing price may occasionally differ from a live AMM. If they wanted Bitflow's live price, they should use Bitflow. The contract cannot protect them against their own venue choice.
 - **MM dilution by JIT arbs in dislocation events**: this is the explicit trade-off for composability. MMs who care should run bots (see decision 1).
-- **Network congestion beyond the 60s Pyth window**: not a contract problem. Infrastructure-layer issue.
+- **Network congestion beyond the 80s Pyth window**: not a contract problem. Infrastructure-layer issue. If settlement repeatedly fails due to stale prices, the cycle gets cancelled after ~5 min and deposits roll forward -- users are never harmed.
 
 ## Alternatives considered and rejected
 
-- **Small buffer (5–10 blocks)**: would restore some JIT arb holding risk, but breaks atomic composability for routers. Rejected.
+- **Small buffer (5--10 blocks)**: would restore some JIT arb holding risk, but breaks atomic composability for routers. Rejected.
 - **`pyth_publish_time >= deposits-closed-block-timestamp` rule in `settle-with-refresh`**: would prevent backward oracle-snapshot selection, but also breaks same-block close+settle bundling. Rejected for the same reason.
 - **Tighter oracle freshness (e.g. 15s)**: would reduce worst-case drift exposure, but triggers spurious cancellations during congestion. Limits already handle the harm case. Rejected.
+- **Wider oracle freshness (120s, matching Zest v2)**: more headroom, but unnecessary given that Jing's drift risk is capped by limits (unlike Zest where stale prices create insolvency risk). 80s gives enough room for the bundled close+settle path while staying tighter than lending protocols.
+- **`MAX_STALENESS` as a `data-var` (admin-adjustable)**: adds a trust assumption (admin can silently widen the window). For a batch auction with limit-bounded deposits, the simpler trust story is a constant. If 80s proves wrong, deploy a new version.
 - **Keeping `u0` as "no limit" with a warning**: supports a footgun for no benefit. Users who want to be filled aggressively can just set a very wide limit. Rejected.
-- **Native `deposit+close+settle` bundled function**: saves a marginal amount of runtime, costs audit surface and flexibility. Rejected. Compose in wrappers.
+- **Native `deposit+close+settle` bundled function**: adds runtime cost and audit surface to the heavy path. Routers/JIT arbs compose the publics in wrapper contracts. Rejected.
+- **Bundled `close-and-settle` (no refresh)**: stored prices are almost always stale after the deposit phase (~70s+). The no-refresh path is useful but rare enough that users can call `close-deposits` + `settle` separately. Rejected.

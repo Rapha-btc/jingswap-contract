@@ -36,8 +36,8 @@
 ;; Constants
 ;; ============================================================================
 
-;; Cycle phase thresholds (in blocks, ~2s each)
-(define-constant DEPOSIT_MIN_BLOCKS u30) ;; min 30 blocks before deposits can be closed (~1 min)
+;; Cycle phase thresholds (in blocks, ~7s each on Nakamoto)
+(define-constant DEPOSIT_MIN_BLOCKS u10) ;; min 10 blocks before deposits can be closed (~70s)
 ;; No buffer phase in blind-premium. Two reasons:
 ;;   1. Atomic composability -- routers and other protocols can bundle
 ;;      deposit + close + settle in one tx, so Jing can be hit as a
@@ -50,7 +50,7 @@
 ;; this is a feature: they compete against each other to settle (anyone
 ;; can call settle with any valid Pyth VAA), which bridges Jing's price
 ;; to external markets and provides counterparty liquidity to users.
-(define-constant CANCEL_THRESHOLD u150)   ;; 150 blocks after closed = anyone can cancel (~5 min)
+(define-constant CANCEL_THRESHOLD u42)    ;; 42 blocks after closed = anyone can cancel (~5 min)
 
 ;; Premium: 20 bps (0.20%) in favor of the STX side.
 ;; Clearing price = oracle * (10000 - PREMIUM_BPS) / 10000
@@ -88,7 +88,7 @@
 (define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
 
 ;; Safety gates
-(define-constant MAX_STALENESS u60)       ;; price must be < 60s old
+(define-constant MAX_STALENESS u80)       ;; price must be < 80s old
 (define-constant MAX_CONF_RATIO u50)      ;; conf < 2% of price (1/50)
 (define-constant MAX_DEX_DEVIATION u10)   ;; oracle vs pool < 10% (1/10)
 
@@ -713,6 +713,18 @@
       (try! (roll-and-sweep-dust))
       (advance-cycle)
       (ok true))))
+
+;; Bundled: close deposits + settle with fresh Pyth VAAs in one tx.
+(define-public (close-and-settle-with-refresh
+  (btc-vaa (buff 8192))
+  (stx-vaa (buff 8192))
+  (pyth-storage <pyth-storage-trait>)
+  (pyth-decoder <pyth-decoder-trait>)
+  (wormhole-core <wormhole-core-trait>))
+  (begin
+    (try! (close-deposits))
+    (try! (settle-with-refresh btc-vaa stx-vaa pyth-storage pyth-decoder wormhole-core))
+    (ok true)))
 
 ;; ============================================================================
 ;; Public: Cancel cycle (after CANCEL_THRESHOLD blocks without settlement)
