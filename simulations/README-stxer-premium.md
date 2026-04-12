@@ -402,8 +402,43 @@ These are the features added in blind-premium that don't exist in blind-auction 
 
 ### Still need dedicated simulations
 
-- [ ] **Mixed limit outcomes in large batch** -- 5 depositors per side with varying limits (some tight, some permissive), verify correct pro-rata distribution among filled depositors only.
-- [ ] **Limit edge: clearing == limit exactly** -- STX side: `clearing == limit` should fill (not roll, since `clearing > limit` is the roll condition). sBTC side: `clearing == limit` should fill (since `clearing < limit` is the roll condition). Verify boundary behavior.
+- [x] **Mixed limit outcomes in large batch** -- `simul-blind-premium-mixed-limits.js`
+- [x] **Limit edge: clearing == limit exactly** -- `simul-blind-premium-limit-edge.js`
+
+### 11. Mixed Limits (`simul-blind-premium-mixed-limits.js`)
+
+5 depositors per side, 2 with tight limits (rolled) and 3 with permissive limits (filled) on each side. Verifies pro-rata distribution only among filled depositors.
+
+| Depositor | Side | Amount | Limit | Outcome |
+|-----------|------|--------|-------|---------|
+| STX D0 | STX | 10 STX | tight (1B) | ROLLED (`limit-roll-stx`) |
+| STX D1 | STX | 20 STX | permissive | FILLED → 5,987 sats |
+| STX D2 | STX | 30 STX | tight (1B) | ROLLED (`limit-roll-stx`) |
+| STX D3 | STX | 40 STX | permissive | FILLED → 11,974 sats |
+| STX D4 | STX | 50 STX | permissive | FILLED → 14,968 sats |
+| sBTC D0 | sBTC | 10k sats | permissive | FILLED → 13,736,250 STX + 5,879 rolled |
+| sBTC D1 | sBTC | 20k sats | tight (99.9T) | ROLLED (`limit-roll-sbtc`) |
+| sBTC D2 | sBTC | 30k sats | permissive | FILLED → 41,208,750 STX + 17,639 rolled |
+| sBTC D3 | sBTC | 40k sats | permissive | FILLED → 54,945,000 STX + 23,519 rolled |
+| sBTC D4 | sBTC | 50k sats | tight (99.9T) | ROLLED (`limit-roll-sbtc`) |
+
+**Results: ALL GREEN (49/49 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/49504b7bffd1d4a7af13aae3b5e02d18
+
+**Settlement after filtering:** stx-cleared=110M (D1+D3+D4), sbtc-cleared=32,962 (of 80k filled), binding="stx"
+
+**Cycle 1 verification:**
+- STX: 40M (10M D0 + 30M D2 rolled by limit) ✓
+- sBTC: 117,037 (20k D1 + 50k D4 rolled by limit + 5,879+17,639+23,519 unfilled from D0+D2+D3) ✓
+- STX depositors: [D0, D2] (limit-rolled only) ✓
+- sBTC depositors: [D1, D4, D0, D2, D3] (limit-rolled + unfilled) ✓
+
+---
+
+### 12. Limit Edge (`simul-blind-premium-limit-edge.js`)
+
+**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/220b278684d00fd39b074742d15ccc7d)
 
 ### 7. Dust Filter (`simul-blind-premium-dust-filter.js`)
 
