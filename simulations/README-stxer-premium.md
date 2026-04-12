@@ -444,7 +444,25 @@ Stxer link: https://stxer.xyz/simulations/mainnet/d5c8a98a99ea7ede4ac0e27ae92734
 
 Ported from `simul-dust-sweep.js`. 3 depositors per side with odd amounts to maximize integer truncation. Verifies sweep-dust event collects all rounding remainders.
 
-**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/a260ee29903cd31746a6dc7511a40793)
+**Results: ALL GREEN (33/33 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/a260ee29903cd31746a6dc7511a40793
+
+**Settlement (step 22):** clearing=33,371,404,794,442 (20 bps), STX binding, stx-cleared=100M, sbtc-cleared=29,965
+
+**Pro-rata distribution with truncation:**
+
+| Depositor | Share | sBTC received | STX received | sBTC rolled |
+|-----------|-------|---------------|--------------|-------------|
+| STX D1 (33.33%) | 33,333,333/100M | 9,978 | -- | -- |
+| STX D2 (44.44%) | 44,444,444/100M | 13,304 | -- | -- |
+| STX D3 (22.22%) | 22,222,223/100M | 6,652 | -- | -- |
+| sBTC D1 (33.33%) | 33,333/100k | -- | 33,299,667 | 23,344 |
+| sBTC D2 (44.44%) | 44,444/100k | -- | 44,399,556 | 31,126 |
+| sBTC D3 (22.22%) | 22,223/100k | -- | 22,200,777 | 15,563 |
+
+**Dust sweep:** sbtc-dust=4 (2 payout + 2 roll) swept to treasury. stx-dust=0.
+**Cycle 1 totals:** sbtc=70,033 = 23,344+31,126+15,563 (exact sum, no inflation) ✓
 
 ---
 
