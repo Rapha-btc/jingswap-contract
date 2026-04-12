@@ -853,7 +853,7 @@
       sbtc-fee: sbtc-fee,
       binding-side: (if sbtc-is-binding "sbtc" "stx")
     })
-    (ok true)))))
+    (ok true))))
 
 ;; ============================================================================
 ;; Private: Push distribution
