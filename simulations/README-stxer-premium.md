@@ -392,12 +392,77 @@ These are the features added in blind-premium that don't exist in blind-auction 
 - [x] **`close-and-settle-with-refresh` bundled function** -- settle-refresh Part B tests the one-tx flow
 - [x] **No buffer phase** -- all simulations go directly from close to settle (no PHASE_BUFFER)
 
+### Ported from blind-auction (results below)
+
+- [x] **Dust filter with premium** -- `simul-blind-premium-dust-filter.js`
+- [x] **Dust sweep with premium (sBTC side)** -- `simul-blind-premium-dust-sweep.js`
+- [x] **Dust sweep with premium (STX side)** -- `simul-blind-premium-dust-sweep-stx-side.js`
+- [x] **Small-share filter** -- `simul-blind-premium-small-share-filter.js`
+
 ### Still need dedicated simulations
 
-- [ ] **Dust sweep with premium math** -- adapt `simul-dust-sweep.js` for premium clearing price. Pro-rata rounding may differ at 20 bps premium vs 0 bps.
-- [ ] **Small-share filter with limits** -- adapt `simul-small-share-filter.js`. Test interaction: does a depositor below MIN_SHARE_BPS get rolled BEFORE limit filtering, or does order matter?
 - [ ] **Mixed limit outcomes in large batch** -- 5 depositors per side with varying limits (some tight, some permissive), verify correct pro-rata distribution among filled depositors only.
 - [ ] **Limit edge: clearing == limit exactly** -- STX side: `clearing == limit` should fill (not roll, since `clearing > limit` is the roll condition). sBTC side: `clearing == limit` should fill (since `clearing < limit` is the roll condition). Verify boundary behavior.
+
+### 7. Dust Filter (`simul-blind-premium-dust-filter.js`)
+
+Ported from `simul-dust-filter.js`. Tests that depositors below MIN_SHARE_BPS (0.20%) get rolled at close-deposits. STX whale (10,000 STX) + dust depositor (1 STX) + sBTC depositor (1,000 sats).
+
+| Step | Action | Result |
+|------|--------|--------|
+| 3 | STX whale deposits 10,000 STX | ok |
+| 4 | Dust depositor deposits 1 STX (~0.01% share) | ok |
+| 5 | sBTC depositor deposits 1,000 sats | ok |
+| 6 | Totals before close | (stx:10,001,000,000, sbtc:1000) |
+| 7 | STX depositors | [whale, dust_depositor] |
+| 8 | Close deposits | ok, `small-share-roll-stx` event for dust depositor |
+| 9 | Totals after close | (stx:10,000,000,000, sbtc:1000) — dust removed |
+| 10 | STX depositors after close | [whale only] |
+| 11 | Dust depositor cycle 0 | u0 (rolled out) |
+| 12 | Cycle 1 totals | (stx:1,000,000, sbtc:0) — dust rolled here |
+| 13 | Dust depositor cycle 1 | u1,000,000 (1 STX intact) |
+| 14 | Cycle 1 STX depositors | [dust_depositor] |
+| 15 | Settle | ok, sBTC binding side |
+| 16 | Settlement | price=33371404794442, stx-cleared=3,337,140, sbtc-cleared=1000 |
+| 17 | Cycle | u1 |
+| 18 | Cycle 1 totals | (stx:9,997,662,860, sbtc:0) — whale rolled + dust depositor |
+| 19 | Dust depositor still in cycle 1 | u1,000,000 |
+
+**Results: ALL GREEN (19/19 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/d5c8a98a99ea7ede4ac0e27ae927343d
+
+**Key verifications:**
+- `small-share-roll-stx` event fires for dust depositor at close-deposits ✓
+- Dust depositor (0.01% share) rolled, whale (99.99%) stays ✓
+- Settlement runs with whale only at premium-adjusted clearing price ✓
+- Cycle 1: whale's unfilled STX (9,996,662,860) + dust depositor's rolled STX (1,000,000) = 9,997,662,860 ✓
+
+---
+
+### 8. Dust Sweep (`simul-blind-premium-dust-sweep.js`)
+
+Ported from `simul-dust-sweep.js`. 3 depositors per side with odd amounts to maximize integer truncation. Verifies sweep-dust event collects all rounding remainders.
+
+**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/a260ee29903cd31746a6dc7511a40793)
+
+---
+
+### 9. Dust Sweep STX Side (`simul-blind-premium-dust-sweep-stx-side.js`)
+
+Ported from `simul-dust-sweep-stx-side.js`. Heavy STX (~10k STX) vs light sBTC (4k sats) so sBTC is binding → large STX unfilled → STX roll dust.
+
+**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/4e73b8980b3d3baf19c7e4e37a22d25c)
+
+---
+
+### 10. Small-Share Filter (`simul-blind-premium-small-share-filter.js`)
+
+Ported from `simul-small-share-filter.js`. Multi-cycle: 3 small fish (1 STX each, ~0.1% share) get rolled repeatedly until whale's STX is mostly cleared, then fish finally exceed 0.2% threshold and settle.
+
+**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/b05bf6453e3bbbd33d2a6bc0f5a74d47)
+
+---
 
 ## Mainnet addresses used
 
