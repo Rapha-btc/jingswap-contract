@@ -260,23 +260,74 @@ Ported from `simul-settle-refresh.js` with added Part B testing `close-and-settl
 
 **NEW** -- tests per-depositor limit filtering, the core blind-premium feature.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | ADDR_A: STX deposit, tight limit (~10 STX/BTC) | deposit ok |
-| 2 | ADDR_B: STX deposit, permissive limit | deposit ok |
-| 3 | ADDR_C: sBTC deposit, tight limit (wants absurdly high price) | deposit ok |
-| 4 | ADDR_D: sBTC deposit, permissive limit | deposit ok |
-| 5 | ADDR_B: set-stx-limit to 500k STX/BTC | ok |
-| 6 | ADDR_B: set-stx-limit to u0 | ERR_LIMIT_REQUIRED (u1017) |
-| 7 | ADDR_A: deposit-stx with u0 limit | ERR_LIMIT_REQUIRED (u1017) |
-| 8 | Close + settle | settlement ok |
-| 9 | ADDR_A in cycle 1 (rolled, limit too tight) | deposit = 10 STX |
-| 10 | ADDR_B in cycle 1 (filled) | deposit = 0 |
-| 11 | ADDR_C in cycle 1 (rolled, limit too tight) | deposit = 10k sats |
-| 12 | ADDR_D in cycle 1 (filled) | deposit = 0 |
-| 13 | Rolled depositors' limits persist | limits intact |
+| Step | Action | Result |
+|------|--------|--------|
+| 2-9 | Fund 4 addresses with 50 STX + 50k sats each | ok |
+| 10 | ADDR_A: deposit 10 STX, limit=1,000,000,000 (~10 STX/BTC, tight) | ok |
+| 11 | ADDR_B: deposit 10 STX, limit=99,999,999,999,999 (permissive) | ok |
+| 12 | ADDR_C: deposit 10k sats, limit=99,999,999,999,999 (tight -- wants absurd min) | ok |
+| 13 | ADDR_D: deposit 10k sats, limit=1 (permissive) | ok |
+| 14 | Totals | (stx:20M, sbtc:20k) |
+| 15-18 | Read all 4 limits | confirmed as set |
+| 19 | ADDR_B: set-stx-limit to 50T | ok, updated |
+| 20 | Read ADDR_B limit | u50000000000000 |
+| 21 | ADDR_B: set-stx-limit to u0 | **(err u1017)** ERR_LIMIT_REQUIRED |
+| 22 | ADDR_A: deposit-stx with limit=u0 | **(err u1017)** ERR_LIMIT_REQUIRED |
+| 23 | Close deposits | ok |
+| 24 | Settle | ok, see below |
+| 25 | Settlement record | price=33371404794442, stx-cleared=10M |
+| 26 | Cycle | u1 |
+| 27 | Cycle 1 totals | (stx:10M, sbtc:17004) |
+| 28 | ADDR_A STX in cycle 1 | u10000000 (rolled) |
+| 29 | ADDR_B STX in cycle 1 | u0 (filled) |
+| 30 | ADDR_C sBTC in cycle 1 | u10000 (rolled) |
+| 31 | ADDR_D sBTC in cycle 1 | u7004 (unfilled portion rolled) |
+| 32 | STX depositors cycle 1 | [ADDR_A] |
+| 33 | sBTC depositors cycle 1 | [ADDR_C, ADDR_D] |
+| 34 | ADDR_A limit persisted | u1000000000 |
+| 35 | ADDR_C limit persisted | u99999999999999 |
 
-**Results:** _TBD_
+**Results: ALL GREEN (35/35 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/2bed5216ffe6fbd424d173ab343ec044
+
+**Limit filtering in action (step 24 events):**
+
+| Depositor | Side | Limit | Clearing | Condition | Outcome |
+|-----------|------|-------|----------|-----------|---------|
+| ADDR_A | STX | 1,000,000,000 (~10 STX/BTC) | 33,371,404,794,442 | clearing > limit | ROLLED (`limit-roll-stx`) |
+| ADDR_B | STX | 50,000,000,000,000 (~500k STX/BTC) | 33,371,404,794,442 | clearing < limit | FILLED |
+| ADDR_C | sBTC | 99,999,999,999,999 (~999k STX/BTC) | 33,371,404,794,442 | clearing < limit | ROLLED (`limit-roll-sbtc`) |
+| ADDR_D | sBTC | 1 | 33,371,404,794,442 | clearing > limit | FILLED |
+
+**Premium verification:** 33,438,281,357,157 * 9980 / 10000 = 33,371,404,794,442 ✓ (exact match)
+
+**Settlement after filtering (only ADDR_B + ADDR_D remain):**
+
+| Field | Value |
+|-------|-------|
+| stx-cleared | 10,000,000 (10 STX, ADDR_B only) |
+| sbtc-cleared | 2,996 sats |
+| sbtc-unfilled | 7,004 sats |
+| stx-fee | 10,000 (0.1%) |
+| sbtc-fee | 2 sats (0.1%) |
+
+**Distribution:**
+- ADDR_B: received 2,994 sats sBTC (2,996 - 2 fee)
+- ADDR_D: received 9,990,000 uSTX (10M - 10k fee), 7,004 sats unfilled rolled
+
+**Cycle 1 breakdown:**
+- ADDR_A: 10M STX rolled (limit-violated)
+- ADDR_C: 10,000 sats rolled (limit-violated)
+- ADDR_D: 7,004 sats rolled (unfilled portion)
+- Total: stx=10M, sbtc=17,004 (10,000 + 7,004) ✓
+
+**Key verifications:**
+- `ERR_LIMIT_REQUIRED (u1017)` rejects u0 in both set-stx-limit and deposit-stx ✓
+- Tight limits cause depositors to be rolled BEFORE settlement math runs ✓
+- Settlement totals reflect post-filter amounts (only filled depositors counted) ✓
+- Rolled depositors' limits persist in cycle 1 ✓
+- Unfilled portion of FILLED depositor (ADDR_D) also rolled to cycle 1 ✓
 
 ---
 
