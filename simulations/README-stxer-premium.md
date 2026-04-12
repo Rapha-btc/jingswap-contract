@@ -121,18 +121,68 @@ Stxer link: https://stxer.xyz/simulations/mainnet/d99b175a4b2b1dda2a870a4629cefe
 
 Ported from `simul-priority-queue.js`. Tests queue bumping with MAX_DEPOSITORS=5. Verifies bumped depositor's limit is also cleared.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | Fill 5 STX slots (4x2 STX + 1x1 STX) | queue full |
-| 2 | Fill 5 sBTC slots (same pattern) | queue full |
-| 3 | 6th STX deposit (0.5 STX) | ERR_DEPOSIT_TOO_SMALL |
-| 4 | 6th STX deposit (3 STX) | bumps 1 STX depositor, limit cleared |
-| 5 | 6th sBTC deposit (500 sats) | ERR_DEPOSIT_TOO_SMALL |
-| 6 | 6th sBTC deposit (3000 sats) | bumps 1000 sats depositor |
-| 7 | Close + settle | settlement with premium |
-| 8 | Read cycle 1 rollover | unfilled amounts rolled |
+| Step | Action | Result |
+|------|--------|--------|
+| 2-9 | Fund 8 addresses with 10 STX each | ok |
+| 10-17 | Fund 8 addresses with 10k sats each | ok |
+| 18-22 | Fill STX queue: 4x2 STX + 1x1 STX | ok, totals=9 STX |
+| 23-27 | Fill sBTC queue: 4x2000 + 1x1000 sats | ok, totals=9000 sats |
+| 28-30 | Read queue lengths + totals | 5 each, (stx:9M, sbtc:9000) |
+| 31 | 6th STX 0.5 STX (below min) | (err u1001) ERR_DEPOSIT_TOO_SMALL |
+| 32 | 6th STX 3 STX (bumps ADDR[4]) | ok, bumped=SP119..., 1 STX returned |
+| 33 | 6th sBTC 500 sats (below min) | (err u1001) ERR_DEPOSIT_TOO_SMALL |
+| 34 | 6th sBTC 3000 sats (bumps ADDR[4]) | ok, bumped=SP119..., 1000 sats returned |
+| 35-36 | Queue lengths after bump | still 5 each |
+| 37 | ADDR[4] STX deposit | u0 (bumped out) |
+| 38 | ADDR[6] STX deposit | u3000000 (new, 3 STX) |
+| 39 | ADDR[4] sBTC deposit | u0 (bumped out) |
+| 40 | ADDR[7] sBTC deposit | u3000 (new) |
+| 41 | Totals after bump | (stx:11M, sbtc:11000) |
+| 42 | Bumped ADDR[4] limit | u0 (cleared on bump) |
+| 43 | Close deposits | ok |
+| 44 | Settle | ok, see below |
+| 45 | Settlement record | price=33371404794442 (20 bps) |
+| 46 | Cycle | u1 |
+| 47 | Cycle 1 totals | (sbtc:7701, stx:0) |
+| 48-49 | Cycle 1 depositor lists | stx=empty, sbtc=5 rolled depositors |
 
-**Results:** _TBD_
+**Results: ALL GREEN (49/49 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/9dfc0bdf8565865b2dc6b2899e5135a7
+
+**Settlement details (step 44):**
+
+| Field | Value |
+|-------|-------|
+| clearing-price | 33,371,404,794,442 (20 bps premium) |
+| binding-side | "stx" |
+| stx-cleared | 11,000,000 (11 STX, 100%) |
+| sbtc-cleared | 3,296 sats (~30% of 11,000) |
+| sbtc-unfilled | 7,704 sats |
+| stx-fee | 11,000 (0.1%) |
+| sbtc-fee | 3 sats (0.1%) |
+
+**Pro-rata distribution (5 depositors per side):**
+
+STX depositors (receive sBTC):
+- ADDR[0-3] (2 STX each, 2/11 share): 598 sats each
+- ADDR[6] (3 STX, 3/11 share): 898 sats
+- Total paid: 3,290 sats + 3 dust → treasury
+
+sBTC depositors (receive STX, unfilled rolled):
+- ADDR[0-3] (2000 sats each): 1,998,000 uSTX + 1,400 sats rolled
+- ADDR[7] (3000 sats): 2,997,000 uSTX + 2,101 sats rolled
+- Total STX paid: 10,989,000 = 11M - 11k fee ✓
+- Total rolled: 4x1400 + 2101 = 7,701 sats (matches cycle 1 totals, 7704 - 3 roll dust)
+
+**Dust sweep:** sbtc-dust=6 (3 payout + 3 roll) → swept to treasury. stx-dust=0.
+
+**Key verifications:**
+- Bumped depositor (ADDR[4]) gets STX + sBTC refunded immediately ✓
+- Bumped depositor's limit cleared (step 42 = u0) ✓
+- Queue stays at MAX_DEPOSITORS=5 after bump ✓
+- Pro-rata distribution scales correctly with unequal deposit sizes ✓
+- Dust sweep handles rounding remainders ✓
 
 ---
 
