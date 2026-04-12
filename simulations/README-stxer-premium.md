@@ -1,0 +1,167 @@
+# blind-premium: Stxer Simulation Guide
+
+Mainnet fork simulations for `blind-premium.clar` using [stxer.xyz](https://stxer.xyz).
+
+Uses `blind-premium-stxer.clar` (zeroed block thresholds, relaxed staleness) for most tests. The settle-refresh simulation patches the production contract to keep `MAX_STALENESS u80` while zeroing block thresholds.
+
+## Running
+
+```bash
+npx tsx simulations/simul-blind-premium.js
+```
+
+Each simulation prints a link to view results on stxer.xyz.
+
+## Simulations
+
+### 1. Full Lifecycle (`simul-blind-premium.js`)
+
+Ported from `simul-blind-auction.js`. Tests the complete deposit -> close -> settle -> rollover flow with 20 bps premium clearing price.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Deploy blind-premium (stxer variant) | ok |
+| 2 | STX depositor deposits 100 STX (permissive limit) | ok |
+| 3 | sBTC depositor deposits 100k sats (permissive limit) | ok |
+| 4 | Read cycle state, limits | cycle 0, deposit phase |
+| 5 | STX depositor top-up +50 STX | total = 150 STX |
+| 6 | Close deposits | ok |
+| 7 | Settle (stored Pyth prices) | ok (stxer staleness relaxed) |
+| 8 | Read settlement | price = oracle * 0.998 (20 bps) |
+| 9 | Verify cycle 1 rollover | unfilled side rolled |
+
+**Results:** _TBD_
+
+---
+
+### 2. Cancel Flows (`simul-blind-premium-cancel-flows.js`)
+
+Ported from `simul-cancel-flows.js`. Tests cancel-deposit, wrong-phase cancels, and cancel-cycle rollforward. Also verifies limits are cleared on cancel and persist across cycle rollover.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| A1 | Deposit STX + sBTC | ok |
+| A2 | Cancel STX deposit | refund, limit cleared |
+| A3 | Cancel sBTC deposit | refund, limit cleared |
+| A4 | Cancel with nothing | ERR_NOTHING_TO_WITHDRAW (u1008) |
+| B1 | Re-deposit both + close | ok |
+| B2 | Cancel during settle | ERR_NOT_DEPOSIT_PHASE (u1002) |
+| C1 | Cancel-cycle | rolls all to cycle 1 |
+| C2 | Verify rollover + limits persist | deposits + limits in cycle 1 |
+| C3 | Cancel rolled deposits | ok |
+
+**Results:** _TBD_
+
+---
+
+### 3. Priority Queue (`simul-blind-premium-priority-queue.js`)
+
+Ported from `simul-priority-queue.js`. Tests queue bumping with MAX_DEPOSITORS=5. Verifies bumped depositor's limit is also cleared.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Fill 5 STX slots (4x2 STX + 1x1 STX) | queue full |
+| 2 | Fill 5 sBTC slots (same pattern) | queue full |
+| 3 | 6th STX deposit (0.5 STX) | ERR_DEPOSIT_TOO_SMALL |
+| 4 | 6th STX deposit (3 STX) | bumps 1 STX depositor, limit cleared |
+| 5 | 6th sBTC deposit (500 sats) | ERR_DEPOSIT_TOO_SMALL |
+| 6 | 6th sBTC deposit (3000 sats) | bumps 1000 sats depositor |
+| 7 | Close + settle | settlement with premium |
+| 8 | Read cycle 1 rollover | unfilled amounts rolled |
+
+**Results:** _TBD_
+
+---
+
+### 4. Same Depositor Both Sides (`simul-blind-premium-same-depositor.js`)
+
+Ported from `simul-same-depositor.js`. Single address deposits on both STX and sBTC sides. Verifies separate limits per side for the same principal.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | Fund depositor with STX | ok |
+| 2 | Deposit STX (permissive limit) | ok |
+| 3 | Deposit sBTC (permissive limit) | ok |
+| 4 | Read both limits for same address | stx-limit != sbtc-limit |
+| 5 | Close + settle | settlement with premium |
+| 6 | Read cycle 1 rollover | unfilled side rolled |
+
+**Results:** _TBD_
+
+---
+
+### 5. Settle-with-Refresh + Bundled Close-and-Settle (`simul-blind-premium-settle-refresh.js`)
+
+Ported from `simul-settle-refresh.js` with added Part B testing `close-and-settle-with-refresh`. Uses real `MAX_STALENESS u80` (not the relaxed stxer value) and fetches a live Pyth VAA from Hermes.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| A1 | Deploy (real staleness, zeroed blocks) | ok |
+| A2 | Deposit 100 STX + 100k sats | ok |
+| A3 | Close deposits | ok |
+| A4 | Try settle (stored prices) | ERR_STALE_PRICE (u1005) |
+| A5 | settle-with-refresh (fresh VAA) | ok |
+| A6 | Read settlement | price = oracle * 0.998 |
+| B1 | Deposit into cycle 1 | ok |
+| B2 | close-and-settle-with-refresh (bundled) | ok, one tx |
+| B3 | Verify cycle advanced to 2 | cycle = 2 |
+
+**Results:** _TBD_
+
+---
+
+### 6. Limit-Price Filter (`simul-blind-premium-limit-filter.js`)
+
+**NEW** -- tests per-depositor limit filtering, the core blind-premium feature.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 1 | ADDR_A: STX deposit, tight limit (~10 STX/BTC) | deposit ok |
+| 2 | ADDR_B: STX deposit, permissive limit | deposit ok |
+| 3 | ADDR_C: sBTC deposit, tight limit (wants absurdly high price) | deposit ok |
+| 4 | ADDR_D: sBTC deposit, permissive limit | deposit ok |
+| 5 | ADDR_B: set-stx-limit to 500k STX/BTC | ok |
+| 6 | ADDR_B: set-stx-limit to u0 | ERR_LIMIT_REQUIRED (u1017) |
+| 7 | ADDR_A: deposit-stx with u0 limit | ERR_LIMIT_REQUIRED (u1017) |
+| 8 | Close + settle | settlement ok |
+| 9 | ADDR_A in cycle 1 (rolled, limit too tight) | deposit = 10 STX |
+| 10 | ADDR_B in cycle 1 (filled) | deposit = 0 |
+| 11 | ADDR_C in cycle 1 (rolled, limit too tight) | deposit = 10k sats |
+| 12 | ADDR_D in cycle 1 (filled) | deposit = 0 |
+| 13 | Rolled depositors' limits persist | limits intact |
+
+**Results:** _TBD_
+
+---
+
+## New features to test (blind-premium vs blind-auction)
+
+These are the features added in blind-premium that don't exist in blind-auction and need simulation coverage:
+
+### Already covered above
+
+- [x] **20 bps premium clearing price** -- all lifecycle simulations verify `price = oracle * 0.998`
+- [x] **Mandatory non-zero limit prices** -- limit-filter simulation tests `ERR_LIMIT_REQUIRED` for u0
+- [x] **Per-depositor limit filtering** -- limit-filter simulation tests tight vs permissive limits, verify rolled vs filled
+- [x] **`set-stx-limit` / `set-sbtc-limit`** -- limit-filter simulation tests mid-cycle limit update
+- [x] **Limit persistence across rollover** -- cancel-flows and limit-filter verify limits survive cycle rolls
+- [x] **Limit cleared on cancel/bump** -- cancel-flows verifies limits cleared, priority-queue verifies bumped limit cleared
+- [x] **`close-and-settle-with-refresh` bundled function** -- settle-refresh Part B tests the one-tx flow
+- [x] **No buffer phase** -- all simulations go directly from close to settle (no PHASE_BUFFER)
+
+### Still need dedicated simulations
+
+- [ ] **Dust sweep with premium math** -- adapt `simul-dust-sweep.js` for premium clearing price. Pro-rata rounding may differ at 20 bps premium vs 0 bps.
+- [ ] **Small-share filter with limits** -- adapt `simul-small-share-filter.js`. Test interaction: does a depositor below MIN_SHARE_BPS get rolled BEFORE limit filtering, or does order matter?
+- [ ] **Mixed limit outcomes in large batch** -- 5 depositors per side with varying limits (some tight, some permissive), verify correct pro-rata distribution among filled depositors only.
+- [ ] **Limit edge: clearing == limit exactly** -- STX side: `clearing == limit` should fill (not roll, since `clearing > limit` is the roll condition). sBTC side: `clearing == limit` should fill (since `clearing < limit` is the roll condition). Verify boundary behavior.
+
+## Mainnet addresses used
+
+| Role | Address | Holds |
+|------|---------|-------|
+| Deployer | `SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22` | -- |
+| STX whale | `SPZSQNQF9SM88N00K4XYV05ZAZRACC748T78P5P3` | ~18k STX |
+| sBTC whale | `SP2C7BCAP2NH3EYWCCVHJ6K0DMZBXDFKQ56KR7QN2` | ~40.5 BTC |
+| STX user 2 | `SP1AE7DW1ZXBH983N89YY6VA5JKPFJWT89RFBPEAY` | funded per-sim |
+| ADDR[0-7] | Various `SP0...` addresses | funded per-sim |
