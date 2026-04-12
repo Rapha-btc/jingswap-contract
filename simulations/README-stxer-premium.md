@@ -190,16 +190,49 @@ sBTC depositors (receive STX, unfilled rolled):
 
 Ported from `simul-same-depositor.js`. Single address deposits on both STX and sBTC sides. Verifies separate limits per side for the same principal.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| 1 | Fund depositor with STX | ok |
-| 2 | Deposit STX (permissive limit) | ok |
-| 3 | Deposit sBTC (permissive limit) | ok |
-| 4 | Read both limits for same address | stx-limit != sbtc-limit |
-| 5 | Close + settle | settlement with premium |
-| 6 | Read cycle 1 rollover | unfilled side rolled |
+| Step | Action | Result |
+|------|--------|--------|
+| 2 | Fund depositor with 200 STX | ok |
+| 3 | Same address deposits 100 STX (limit=permissive) | ok |
+| 4 | Same address deposits 100k sats (limit=1) | ok |
+| 5 | Read totals | (stx:100M, sbtc:100k) |
+| 6 | STX depositors | [SP2C7...] (same address) |
+| 7 | sBTC depositors | [SP2C7...] (same address) |
+| 8 | STX limit for depositor | u99999999999999 |
+| 9 | sBTC limit for depositor | u1 |
+| 10 | Close deposits | ok |
+| 11 | Settle | ok, see below |
+| 12 | Settlement record | price=33371404794442, stx-cleared=100M |
+| 13 | Cycle | u1 |
+| 14 | Cycle 1 totals | (sbtc:70035, stx:0) |
+| 15 | STX deposit cycle 1 | u0 (fully filled) |
+| 16 | sBTC deposit cycle 1 | u70035 (unfilled rolled) |
 
-**Results:** _TBD_
+**Results: ALL GREEN (16/16 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/f8f5667020981db3744579821ebc9630
+
+**Settlement details (step 11):**
+
+| Field | Value |
+|-------|-------|
+| clearing-price | 33,371,404,794,442 (20 bps premium) |
+| binding-side | "stx" |
+| stx-cleared | 100,000,000 (100 STX, 100%) |
+| sbtc-cleared | 29,965 sats (~30% of 100k) |
+| sbtc-unfilled | 70,035 sats |
+| stx-fee | 100,000 (0.1%) |
+| sbtc-fee | 29 sats (0.1%) |
+
+**Same-address distribution:**
+- As STX depositor: received 29,936 sats sBTC (29,965 - 29 fee)
+- As sBTC depositor: received 99,900,000 uSTX (100M - 100k fee), 70,035 sats unfilled rolled
+
+**Key verifications:**
+- Same principal appears in both depositor lists independently ✓
+- Separate limits per side for same address (stx-limit vs sbtc-limit) ✓
+- Settlement distributes correctly to same address on both sides ✓
+- Zero dust (1 depositor per side = no rounding) ✓
 
 ---
 
