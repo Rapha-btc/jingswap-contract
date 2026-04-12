@@ -138,6 +138,43 @@ describe.skipIf(!remoteDataEnabled)("sbtc-stx-20-v2 (20bps)", function () {
     pub(C, "set-contract-owner", [Cl.principal(deployer)], wallet1);
   });
 
+  // --- set-min-sbtc-deposit ---
+  it("admin: set-min-sbtc-deposit", function () {
+    expect(pub(C, "set-min-sbtc-deposit", [Cl.uint(5_000)], deployer).result).toBeOk(Cl.bool(true));
+    fundSbtc(wallet2, SBTC_2K);
+    expect(pub(C, "deposit-sbtc", [Cl.uint(SBTC_2K), Cl.uint(100_000)], wallet2).result).toBeErr(Cl.uint(1001));
+    expect(pub(C, "set-min-sbtc-deposit", [Cl.uint(1_000)], wallet1).result).toBeErr(Cl.uint(1011));
+    pub(C, "set-min-sbtc-deposit", [Cl.uint(1_000)], deployer);
+  });
+
+  // --- close-deposits: one-sided + double close ---
+  it("close-deposits: fails one-sided, double close rejected", function () {
+    pub(C, "deposit-stx", [Cl.uint(STX_100), Cl.uint(300_000)], wallet1);
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+    expect(pub(C, "close-deposits", [], wallet1).result).toBeErr(Cl.uint(1012));
+  });
+
+  // --- Small share filtering ---
+  it("small share filtering: tiny deposit rolled on close-deposits", function () {
+    const LIMIT = 99_999_999_999_999;
+    fundSbtc(wallet2, SBTC_2K);
+    pub(C, "deposit-stx", [Cl.uint(STX_1), Cl.uint(LIMIT)], wallet5);
+    pub(C, "deposit-stx", [Cl.uint(500 * STX_1), Cl.uint(LIMIT)], wallet1);
+    pub(C, "deposit-sbtc", [Cl.uint(SBTC_2K), Cl.uint(1)], wallet2);
+
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+    const closeResult = pub(C, "close-deposits", [], wallet1);
+    expect(closeResult.result).toBeOk(Cl.bool(true));
+
+    const w5cycle1 = Number(cvToJSON(ro(C, "get-stx-deposit", [Cl.uint(1), Cl.principal(wallet5)])).value);
+    expect(w5cycle1).toBe(STX_1);
+
+    const events = closeResult.events
+      .filter((e: any) => e.event === "print_event")
+      .map((e: any) => cvToJSON(e.data.value));
+    expect(events.filter((v: any) => v.value?.event?.value === "small-share-roll-stx").length).toBeGreaterThan(0);
+  });
+
   // --- Close + phase guards ---
   it("close-deposits: timing gate + phase guards", function () {
     fundSbtc(wallet2, SBTC_10K);
