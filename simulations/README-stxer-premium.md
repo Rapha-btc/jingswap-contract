@@ -18,19 +18,49 @@ Each simulation prints a link to view results on stxer.xyz.
 
 Ported from `simul-blind-auction.js`. Tests the complete deposit -> close -> settle -> rollover flow with 20 bps premium clearing price.
 
-| Step | Action | Expected |
-|------|--------|----------|
+| Step | Action | Result |
+|------|--------|--------|
 | 1 | Deploy blind-premium (stxer variant) | ok |
-| 2 | STX depositor deposits 100 STX (permissive limit) | ok |
-| 3 | sBTC depositor deposits 100k sats (permissive limit) | ok |
-| 4 | Read cycle state, limits | cycle 0, deposit phase |
-| 5 | STX depositor top-up +50 STX | total = 150 STX |
-| 6 | Close deposits | ok |
-| 7 | Settle (stored Pyth prices) | ok (stxer staleness relaxed) |
-| 8 | Read settlement | price = oracle * 0.998 (20 bps) |
-| 9 | Verify cycle 1 rollover | unfilled side rolled |
+| 2 | STX depositor deposits 100 STX (limit=99999999999999) | ok, 100 STX transferred |
+| 3 | sBTC depositor deposits 100k sats (limit=1) | ok, 100k sats transferred |
+| 4 | Read cycle state | cycle=0, phase=0 (deposit), totals=(stx:100M, sbtc:100k) |
+| 5 | Read limits | stx-limit=99999999999999, sbtc-limit=1 |
+| 6 | STX depositor top-up +50 STX | ok, total=150M (150 STX) |
+| 7 | Close deposits | ok, closed-at-block=7568791 |
+| 8 | Read phase | u2 (PHASE_SETTLE, no buffer) |
+| 9 | Settle (stored Pyth prices) | ok |
+| 10 | Read settlement | see below |
+| 11 | Verify cycle=1 | ok |
+| 12 | Read DEX price | 33,271,382,492,360 |
+| 13 | Cycle 1 rollover | sbtc=55,052 rolled, stx=0 (fully filled) |
 
-**Results:** _TBD_
+**Results: ALL GREEN (27/27 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/048c1b6fae366b5ba53bf8793dc49f14
+
+**Settlement details (step 9):**
+
+| Field | Value | Notes |
+|-------|-------|-------|
+| oracle-price | 33,438,281,357,157 | ~334,382 STX/BTC |
+| clearing-price | 33,371,404,794,442 | oracle * 9980/10000 (20 bps premium) |
+| binding-side | "stx" | STX fully cleared, sBTC partially |
+| stx-cleared | 150,000,000 | 150 STX (100%) |
+| sbtc-cleared | 44,948 | ~44.9% of 100k sats |
+| sbtc-unfilled | 55,052 | rolled to cycle 1 |
+| stx-fee | 150,000 | 0.1% of 150M |
+| sbtc-fee | 44 | 0.1% of 44,948 |
+
+**Premium verification:** 33,438,281,357,157 * 9980 / 10000 = 33,371,404,794,442 ✓
+
+**Distribution:**
+- STX depositor received 44,904 sats sBTC (44,948 - 44 fee)
+- sBTC depositor received 149,850,000 uSTX (150M - 150k fee), 55,052 sats unfilled rolled to cycle 1
+
+**Cycle 1 state:**
+- total-sbtc: 55,052, total-stx: 0
+- sBTC depositor list: [SP2C7...], STX depositor list: empty
+- Only unfilled sBTC rolled forward; STX side fully filled and cleared
 
 ---
 
