@@ -5,14 +5,19 @@
 ;;   Fork of blind-auction with two changes:
 ;;     1. Clearing price = oracle * (1 - PREMIUM_BPS/10000). Premium favors
 ;;        the STX side (MMs supplying STX get slightly more sBTC per STX
-;;        than oracle says; sBTC sellers pay the premium). Fixed at 40 bps.
+;;        than oracle says; sBTC sellers pay the premium). Fixed at 20 bps.
 ;;     2. Per-depositor limit prices. Each deposit includes a limit; at
 ;;        settlement, depositors whose limit is violated by the clearing
 ;;        price are rolled to the next cycle instead of filling at a bad
 ;;        price. Limit = 0 means "accept any clearing price".
-;;   The 30-block buffer between close-deposits and settle is removed —
-;;   limit prices + the three price gates (staleness, confidence, DEX)
-;;   make arb games impossible without further cooldown.
+;;   The 30-block buffer between close-deposits and settle is removed to
+;;   enable atomic composability: other protocols (Bitflow, Velar, routers)
+;;   can bundle deposit + close + settle in a single tx, making Jing an
+;;   interoperable venue rather than an isolated island. Per-depositor
+;;   limits + the three price gates (staleness, confidence, DEX) protect
+;;   honest depositors from bad fills. JIT arbs routing across venues are
+;;   welcomed -- they bridge Jing's clearing price to external markets and
+;;   provide counterparty liquidity to honest users.
 ;;   Cycle advances ONLY on successful settlement. If settlement keeps
 ;;   failing, anyone can cancel after CANCEL_THRESHOLD blocks, rolling
 ;;   all deposits to the next cycle.
@@ -32,25 +37,30 @@
 ;; ============================================================================
 
 ;; Cycle phase thresholds (in blocks, ~2s each)
-(define-constant DEPOSIT_MIN_BLOCKS u150) ;; min 150 blocks before deposits can be closed (~5 min)
-;; No buffer phase in blind-premium: per-depositor limits + the three
-;; oracle safety gates eliminate the price-gaming vector that the buffer
-;; protected against in blind-auction. Depositors commit to a clearing
-;; price bound at deposit time; they can't profit from knowing the
-;; settlement price in advance.
-(define-constant BUFFER_BLOCKS u0)
-(define-constant CANCEL_THRESHOLD u500)   ;; 500 blocks after closed = anyone can cancel (~16 min)
+(define-constant DEPOSIT_MIN_BLOCKS u30) ;; min 30 blocks before deposits can be closed (~1 min)
+;; No buffer phase in blind-premium. Two reasons:
+;;   1. Atomic composability -- routers and other protocols can bundle
+;;      deposit + close + settle in one tx, so Jing can be hit as a
+;;      liquidity leg alongside Bitflow/Velar without waiting out a
+;;      cooldown window.
+;;   2. Honest depositors are protected by per-depositor limits + the
+;;      three oracle safety gates (staleness, confidence, DEX). A bad
+;;      clearing price rolls the depositor instead of filling them.
+;; JIT arbs can still capture the oracle-vs-external-venue spread, but
+;; this is a feature: they compete against each other to settle (anyone
+;; can call settle with any valid Pyth VAA), which bridges Jing's price
+;; to external markets and provides counterparty liquidity to users.
+(define-constant CANCEL_THRESHOLD u150)   ;; 150 blocks after closed = anyone can cancel (~5 min)
 
-;; Premium: 40 bps (0.40%) in favor of the STX side.
+;; Premium: 20 bps (0.20%) in favor of the STX side.
 ;; Clearing price = oracle * (10000 - PREMIUM_BPS) / 10000
 ;; STX depositors get more sBTC per STX than oracle; sBTC depositors
 ;; receive less STX per sBTC than oracle. Friedger-style sBTC sellers
 ;; pay the premium; STX-side MMs earn it.
-(define-constant PREMIUM_BPS u40)
+(define-constant PREMIUM_BPS u20)
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
-(define-constant PHASE_BUFFER u1)
 (define-constant PHASE_SETTLE u2)
 
 ;; Max depositors per side per cycle (u50 for mainnet)
@@ -159,7 +169,7 @@
   { cycle: uint, depositor: principal }
   uint)
 
-;; Per-depositor clearing-price limits. Keyed by principal only — limits
+;; Per-depositor clearing-price limits. Keyed by principal only -- limits
 ;; persist across cycles as long as the depositor has funds in the system.
 ;; STX side: max STX-per-sBTC the depositor will pay. u0 = no limit.
 ;; sBTC side: min STX-per-sBTC the depositor will accept. u0 = no limit.
@@ -204,15 +214,12 @@
 
 ;; Phase logic:
 ;; - deposits-closed-block = 0: deposits still open
-;; - closed but buffer not passed: buffer (no actions)
-;; - buffer passed: settle
+;; - deposits-closed-block > 0: settle phase (no buffer)
 (define-read-only (get-cycle-phase)
   (let ((closed-block (var-get deposits-closed-block)))
     (if (is-eq closed-block u0)
       PHASE_DEPOSIT
-      (if (< stacks-block-height (+ closed-block BUFFER_BLOCKS))
-        PHASE_BUFFER
-        PHASE_SETTLE))))
+      PHASE_SETTLE)))
 
 (define-read-only (get-cycle-totals (cycle uint))
   (default-to { total-stx: u0, total-sbtc: u0 }
@@ -286,7 +293,7 @@
 ;; ============================================================================
 
 ;; Move a depositor's STX deposit from cancelled cycle to next cycle.
-;; Limits are keyed by principal and persist automatically — nothing to move.
+;; Limits are keyed by principal and persist automatically -- nothing to move.
 (define-private (roll-stx-depositor (depositor principal))
   (let ((cycle (var-get current-cycle)))
     (map-set stx-deposits { cycle: (+ cycle u1), depositor: depositor }
@@ -713,8 +720,7 @@
     (totals (get-cycle-totals cycle))
   )
     (asserts! (> closed-block u0) ERR_NOT_SETTLE_PHASE)
-    (asserts! (>= stacks-block-height
-                  (+ closed-block BUFFER_BLOCKS CANCEL_THRESHOLD))
+    (asserts! (>= stacks-block-height (+ closed-block CANCEL_THRESHOLD))
               ERR_CANCEL_TOO_EARLY)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
     (map-set cycle-totals (+ cycle u1) totals)
@@ -768,7 +774,7 @@
 
     ;; Roll depositors whose limits are violated by the clearing price.
     ;; Clearing price is fixed (depends only on oracle + premium), so a
-    ;; single pass is sufficient — filtering cannot change it.
+    ;; single pass is sufficient -- filtering cannot change it.
     (var-set settle-clearing-price clearing-price)
     (map filter-limit-violating-stx-depositor (get-stx-depositors cycle))
     (map filter-limit-violating-sbtc-depositor (get-sbtc-depositors cycle))
@@ -858,7 +864,7 @@
         (map-set stx-depositor-list next-cycle
               (unwrap-panic (as-max-len? (append (get-stx-depositors next-cycle) depositor) u50)))
         true)
-      ;; Fully filled — depositor has no remaining balance, clear their limit.
+      ;; Fully filled -- depositor has no remaining balance, clear their limit.
       (begin 
         (map-delete stx-deposit-limits depositor) 
         true))
@@ -895,7 +901,7 @@
         (map-set sbtc-depositor-list next-cycle
           (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
         true)
-      ;; Fully filled — depositor has no remaining balance, clear their limit.
+      ;; Fully filled -- depositor has no remaining balance, clear their limit.
       (begin 
         (map-delete sbtc-deposit-limits depositor) 
         true))
