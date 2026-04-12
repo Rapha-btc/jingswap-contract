@@ -470,7 +470,25 @@ Stxer link: https://stxer.xyz/simulations/mainnet/a260ee29903cd31746a6dc7511a407
 
 Ported from `simul-dust-sweep-stx-side.js`. Heavy STX (~10k STX) vs light sBTC (4k sats) so sBTC is binding → large STX unfilled → STX roll dust.
 
-**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/4e73b8980b3d3baf19c7e4e37a22d25c)
+**Results: ALL GREEN (30/30 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/4e73b8980b3d3baf19c7e4e37a22d25c
+
+**Settlement (step 22):** binding-side="sbtc", clearing=33,371,404,794,442 (20 bps), sbtc-cleared=4,000 (100%), stx-cleared=13,348,561, stx-unfilled=9,986,651,439
+
+**Pro-rata distribution:**
+
+| Depositor | Side | Share | Received | Rolled |
+|-----------|------|-------|----------|--------|
+| STX D1 (33.33%) | STX | 3,333M/10B | 1,331 sats | 3,328,883,812 STX |
+| STX D2 (44.44%) | STX | 4,444M/10B | 1,775 sats | 4,438,511,750 STX |
+| STX D3 (22.22%) | STX | 2,222M/10B | 888 sats | 2,219,255,876 STX |
+| sBTC D1 (33.33%) | sBTC | 1,333/4k | 4,443,959 STX | 0 (fully filled) |
+| sBTC D2 (36.10%) | sBTC | 1,444/4k | 4,814,011 STX | 0 (fully filled) |
+| sBTC D3 (30.58%) | sBTC | 1,223/4k | 4,077,241 STX | 0 (fully filled) |
+
+**Dust sweep:** stx-dust=3 (2 payout + 1 roll), sbtc-dust=2 (2 payout + 0 roll) → both swept to treasury ✓
+**Cycle 1:** stx=9,986,651,438 = sum(3,328,883,812 + 4,438,511,750 + 2,219,255,876) ✓, sbtc=0
 
 ---
 
