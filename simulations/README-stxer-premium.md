@@ -438,7 +438,31 @@ Stxer link: https://stxer.xyz/simulations/mainnet/49504b7bffd1d4a7af13aae3b5e02d
 
 ### 12. Limit Edge (`simul-blind-premium-limit-edge.js`)
 
-**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/220b278684d00fd39b074742d15ccc7d)
+Boundary test: cycle 1 sets limit = exact clearing price, cycle 2 sets limit off by 1.
+
+**Results: ALL GREEN (26/26 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/220b278684d00fd39b074742d15ccc7d
+
+**Cycle 0 (discovery):** settle with permissive limits → clearing=33,371,404,794,442 confirmed.
+
+**Cycle 1 (limit == clearing → should FILL):**
+- STX limit = 33,371,404,794,442 (max pay = exactly clearing)
+- sBTC limit = 33,371,404,794,442 (min accept = exactly clearing)
+- Settle → **(ok true)**, NO `limit-roll-*` events ✓
+- Both depositors fill normally at the exact limit boundary
+- Verification: `(> clearing limit)` = `(> X X)` = FALSE → no roll ✓
+- Verification: `(< clearing limit)` = `(< X X)` = FALSE → no roll ✓
+
+**Cycle 2 (limit off by 1 → should ROLL):**
+- STX limit = 33,371,404,794,441 (clearing - 1, max pay is 1 below clearing)
+- sBTC limit = 33,371,404,794,443 (clearing + 1, min accept is 1 above clearing)
+- Settle → **(err u1012)** ERR_NOTHING_TO_SETTLE ✓
+- Both depositors rolled out by limit filtering → no remaining deposits → settle fails
+- Verification: `(> 33371404794442 33371404794441)` = TRUE → rolled ✓
+- Verification: `(< 33371404794442 33371404794443)` = TRUE → rolled ✓
+
+**Important behavior:** when settle fails with ERR_NOTHING_TO_SETTLE, all state changes (including the limit-filtering rolls) are **reverted** by Clarity's atomic transaction semantics. Depositors' funds stay locked in cycle 2 in SETTLE phase — they'd need `cancel-cycle` to exit. This is safe: funds are never lost, just stuck until cancel.
 
 ### 7. Dust Filter (`simul-blind-premium-dust-filter.js`)
 
