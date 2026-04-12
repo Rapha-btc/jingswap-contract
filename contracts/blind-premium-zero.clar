@@ -1,6 +1,6 @@
-;; title: blind-premium
+;; title: blind-premium-zero
 ;; version: 0.1.0
-;; summary: Premium batch auction for sBTC/STX swaps with per-depositor limits
+;; summary: Zero-premium batch auction for sBTC/STX swaps with per-depositor limits
 ;; description:
 ;;   Fork of blind-auction with two changes:
 ;;     1. Clearing price = oracle * (1 - PREMIUM_BPS/10000). Premium favors
@@ -52,12 +52,7 @@
 ;; to external markets and provides counterparty liquidity to users.
 (define-constant CANCEL_THRESHOLD u42)    ;; 42 blocks after closed = anyone can cancel (~5 min)
 
-;; Premium: 20 bps (0.20%) in favor of the STX side.
-;; Clearing price = oracle * (10000 - PREMIUM_BPS) / 10000
-;; STX depositors get more sBTC per STX than oracle; sBTC depositors
-;; receive less STX per sBTC than oracle. Friedger-style sBTC sellers
-;; pay the premium; STX-side MMs earn it.
-(define-constant PREMIUM_BPS u20)
+;; No premium. Clearing price = oracle price directly.
 
 ;; Phases
 (define-constant PHASE_DEPOSIT u0)
@@ -769,11 +764,6 @@
     (stx-price (to-uint (get price stx-feed)))
     (oracle-price (/ (* btc-price PRICE_PRECISION) stx-price))
     (dex-price (get-dex-price))
-    ;; Premium-adjusted clearing price favors the STX side: sBTC sellers
-    ;; receive slightly less STX per sBTC than oracle says.
-    (clearing-price (/ (* oracle-price (- BPS_PRECISION PREMIUM_BPS)) BPS_PRECISION))
-    
-
     (min-freshness (- stacks-block-time MAX_STALENESS))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
@@ -795,7 +785,7 @@
     ;; Roll depositors whose limits are violated by the clearing price.
     ;; Clearing price is fixed (depends only on oracle + premium), so a
     ;; single pass is sufficient -- filtering cannot change it.
-    (var-set settle-clearing-price clearing-price)
+    (var-set settle-clearing-price oracle-price)
     (map filter-limit-violating-stx-depositor (get-stx-depositors cycle))
     (map filter-limit-violating-sbtc-depositor (get-sbtc-depositors cycle))
 
@@ -804,10 +794,10 @@
       (totals (get-cycle-totals cycle))
       (total-stx (get total-stx totals))
       (total-sbtc (get total-sbtc totals))
-      (stx-value-of-sbtc (/ (* total-sbtc clearing-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
+      (stx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
       (sbtc-is-binding (<= stx-value-of-sbtc total-stx))
       (stx-clearing (if sbtc-is-binding stx-value-of-sbtc total-stx))
-      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) clearing-price)))
+      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-stx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
       (stx-fee (/ (* stx-clearing FEE_BPS) BPS_PRECISION))
       (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
       (stx-unfilled (- total-stx stx-clearing))
@@ -817,7 +807,7 @@
                    (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     ;; Record settlement
     (map-set settlements cycle
-      { price: clearing-price,
+      { price: oracle-price,
         stx-cleared: stx-clearing,
         sbtc-cleared: sbtc-clearing,
         stx-fee: stx-fee,
@@ -844,7 +834,7 @@
       event: "settlement",
       cycle: cycle,
       oracle-price: oracle-price,
-      clearing-price: clearing-price,
+      clearing-price: oracle-price,
       stx-cleared: stx-clearing,
       sbtc-cleared: sbtc-clearing,
       stx-unfilled: stx-unfilled,
