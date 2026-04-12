@@ -45,8 +45,9 @@ contract_id = "SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1"
 # VM token supply bug is FIXED on clarinet-sdk 3.15.0.
 # Disabled by default - other tests rely on Devnet.toml sbtc_balance which
 # is ignored with remote_data (must use whale funding instead).
+# Enable for v2 settlement tests (requires network access)
 [repl.remote_data]
-enabled = false
+enabled = true
 api_url = 'https://api.hiro.so'
 
 [repl.analysis]
@@ -65,17 +66,28 @@ path = "contracts/blind-auction-stxer.clar"
 clarity_version = 4
 epoch = "latest"
 
-[contracts.jing-vault-auth]
-path = "contracts/jing-vault-auth.clar"
+[contracts.sbtc-stx-0-v2]
+path = "contracts/v2/sbtc-stx-0-v2.clar"
 clarity_version = 4
 epoch = "latest"
 
-[contracts.jing-vault-registry]
-path = "contracts/jing-vault-registry.clar"
+[contracts.sbtc-stx-20-v2]
+path = "contracts/v2/sbtc-stx-20-v2.clar"
 clarity_version = 4
 epoch = "latest"
 
-[contracts.jing-vault-v1]
-path = "contracts/jing-vault-v1.clar"
-clarity_version = 4
-epoch = "latest"
+
+# [contracts.jing-vault-auth]
+# path = "contracts/jing-vault-auth.clar"
+# clarity_version = 4
+# epoch = "latest"
+
+# [contracts.jing-vault-registry]
+# path = "contracts/jing-vault-registry.clar"
+# clarity_version = 4
+# epoch = "latest"
+
+# [contracts.jing-vault-v1]
+# path = "contracts/jing-vault-v1.clar"
+# clarity_version = 4
+# epoch = "latest"

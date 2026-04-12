@@ -58,7 +58,7 @@
     (print { event: "vault-unregistered", owner: tx-sender, vault: vault })
     (ok true)))
 
-;; Activity log endpoints — called by vaults. Each emits a print with
+;; Activity log endpoints - called by vaults. Each emits a print with
 ;; `vault` (contract-caller) captured natively,
 ;; so vaults never pass the vault principal as a param.
 
