@@ -68,19 +68,52 @@ Stxer link: https://stxer.xyz/simulations/mainnet/048c1b6fae366b5ba53bf8793dc49f
 
 Ported from `simul-cancel-flows.js`. Tests cancel-deposit, wrong-phase cancels, and cancel-cycle rollforward. Also verifies limits are cleared on cancel and persist across cycle rollover.
 
-| Step | Action | Expected |
-|------|--------|----------|
-| A1 | Deposit STX + sBTC | ok |
-| A2 | Cancel STX deposit | refund, limit cleared |
-| A3 | Cancel sBTC deposit | refund, limit cleared |
-| A4 | Cancel with nothing | ERR_NOTHING_TO_WITHDRAW (u1008) |
-| B1 | Re-deposit both + close | ok |
-| B2 | Cancel during settle | ERR_NOT_DEPOSIT_PHASE (u1002) |
-| C1 | Cancel-cycle | rolls all to cycle 1 |
-| C2 | Verify rollover + limits persist | deposits + limits in cycle 1 |
-| C3 | Cancel rolled deposits | ok |
+| Step | Action | Result |
+|------|--------|--------|
+| 2 | Deposit 100 STX (limit=permissive) | ok |
+| 3 | Deposit 100k sats (limit=1) | ok |
+| 4 | Read totals | (stx:100M, sbtc:100k) |
+| 5 | Cancel STX deposit | ok, 100 STX refunded |
+| 6 | Cancel sBTC deposit | ok, 100k sats refunded |
+| 7 | Read totals | (stx:0, sbtc:0) |
+| 8-9 | Depositor lists | both empty |
+| 10 | STX limit after cancel | u0 (cleared) |
+| 11 | sBTC limit after cancel | u0 (cleared) |
+| 12 | Cancel again (nothing) | (err u1008) ERR_NOTHING_TO_WITHDRAW |
+| 13 | Re-deposit STX 100 | ok |
+| 14 | Re-deposit sBTC 100k | ok |
+| 15 | STX_USER_2 deposit 50 STX | **(err u1)** -- unfunded address, test gap |
+| 16 | Close deposits | ok |
+| 17 | Phase | u2 (SETTLE) |
+| 18 | Cancel STX during settle | (err u1002) ERR_NOT_DEPOSIT_PHASE |
+| 19 | Cancel sBTC during settle | (err u1002) ERR_NOT_DEPOSIT_PHASE |
+| 20 | Totals before cancel-cycle | (stx:100M, sbtc:100k) |
+| 21 | Cancel-cycle | ok, rolled stx:100M + sbtc:100k |
+| 22 | Current cycle | u1 |
+| 23 | Phase | u0 (DEPOSIT) |
+| 24 | Cycle 1 totals | (stx:100M, sbtc:100k) -- rolled |
+| 25 | STX_USER deposit in cycle 1 | u100000000 |
+| 27 | SBTC_USER deposit in cycle 1 | u100000 |
+| 28-29 | Depositor lists cycle 1 | [STX_USER], [SBTC_USER] |
+| 30 | STX limit after rollover | u99999999999999 (persisted) |
+| 31 | sBTC limit after rollover | u1 (persisted) |
+| 32 | Cycle 0 totals | (0, 0) -- cleared |
+| 33 | Cancel rolled STX in cycle 1 | ok, 100 STX refunded |
+| 34 | Cancel rolled sBTC in cycle 1 | ok, 100k sats refunded |
+| 35-37 | Final state | cycle 1 totals=(0,0), both lists empty |
 
-**Results:** _TBD_
+**Results: 36/37 GREEN** (step 15 failed: STX_USER_2 unfunded on mainnet -- test gap, not contract bug)
+
+Stxer link: https://stxer.xyz/simulations/mainnet/d99b175a4b2b1dda2a870a4629cefecf
+
+**Key verifications:**
+- Limits cleared on cancel (steps 10-11) ✓
+- Limits persist across cancel-cycle rollover (steps 30-31) ✓
+- Cancel rejected during settle phase with ERR_NOT_DEPOSIT_PHASE (steps 18-19) ✓
+- Cancel-cycle rolls deposits + depositor lists to next cycle (steps 24-29) ✓
+- Rolled deposits can be cancelled in the new cycle (steps 33-34) ✓
+
+**Note:** Step 15 should fund STX_USER_2 before depositing. This was also an issue in the blind-auction cancel-flows simulation.
 
 ---
 
