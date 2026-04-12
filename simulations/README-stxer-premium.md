@@ -496,7 +496,28 @@ Stxer link: https://stxer.xyz/simulations/mainnet/4e73b8980b3d3baf19c7e4e37a22d2
 
 Ported from `simul-small-share-filter.js`. Multi-cycle: 3 small fish (1 STX each, ~0.1% share) get rolled repeatedly until whale's STX is mostly cleared, then fish finally exceed 0.2% threshold and settle.
 
-**Results:** _TBD_ (link: https://stxer.xyz/simulations/mainnet/b05bf6453e3bbbd33d2a6bc0f5a74d47)
+**Results: ALL GREEN (39/39 steps)**
+
+Stxer link: https://stxer.xyz/simulations/mainnet/b05bf6453e3bbbd33d2a6bc0f5a74d47
+
+**Cycle 0:** Whale=1000 STX, 3 fish=1 STX each (~0.1% share). sBTC=100k sats.
+- Close: 3x `small-share-roll-stx` events → fish rolled to cycle 1 ✓
+- Settle: sBTC binding, stx-cleared=333,714,047, whale gets 99,900 sats. Whale's unfilled 666M STX rolled.
+
+**Cycle 1:** Whale=666M STX (rolled) + fish=3M STX. sBTC whale deposits 3 BTC.
+- Close: 3x `small-share-roll-stx` again (fish=1M/669M ≈ 0.15% < 0.2%) → rolled to cycle 2 ✓
+- Settle: STX binding, whale's 666M fully cleared. sBTC depositor gets 665.6M STX, 299.8M sats rolled.
+
+**Cycle 2:** Fish=3M STX (only depositors left!). sBTC whale deposits 100k more sats.
+- Close: NO small-share rolls! Fish are 33.3% each → above 0.2% ✓
+- Settle: STX binding, stx-cleared=3M. Each fish receives 299 sats sBTC. Fish finally filled! ✓
+
+**Key verifications:**
+- Fish rolled in cycle 0 (0.1% < 0.2% threshold) ✓
+- Fish rolled again in cycle 1 (0.15% < 0.2%) ✓
+- Fish stay in cycle 2 (33.3% > 0.2%) and fill successfully ✓
+- Limits persist across all 3 cycles without re-setting ✓
+- Multi-cycle settlement math correct with premium at each cycle ✓
 
 ---
 
