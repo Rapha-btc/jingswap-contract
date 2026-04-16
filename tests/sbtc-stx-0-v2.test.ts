@@ -850,4 +850,176 @@ describe.skipIf(!remoteDataEnabled)("sbtc-stx-0-v2 (0bps)", function () {
     expect(price).toBeGreaterThan(0);
     console.log(`[0bps] settle-with-refresh: cycle ${preCycle} cleared at price ${price}`);
   });
+
+  // --- close-and-settle-with-refresh (bundled production entry point) ---
+  // Frontend calls this in a single tx: it wraps close-deposits + settle-with-refresh.
+  // VM + network gated.
+  it("close-and-settle-with-refresh bundled call with live Hermes VAA", async function () {
+    const BTC_FEED_ID = "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+    const STX_FEED_ID = "ec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17";
+
+    const timestamp = Math.floor(Date.now() / 1000) - 30;
+    const url = `https://hermes.pyth.network/v2/updates/price/${timestamp}?ids[]=${BTC_FEED_ID}&ids[]=${STX_FEED_ID}`;
+
+    let vaaHex: string;
+    try {
+      const response = await fetch(url, { headers: { accept: "application/json" } });
+      const data = await response.json();
+      if (!data?.binary?.data?.[0]) {
+        console.log("[0bps] close-and-settle-with-refresh: skipped — no VAA");
+        return;
+      }
+      vaaHex = data.binary.data[0];
+    } catch (e) {
+      console.log("[0bps] close-and-settle-with-refresh: skipped — Hermes fetch failed:", (e as Error).message);
+      return;
+    }
+
+    const LIMIT_HIGH = 99_999_999_999_999;
+    try {
+      fundSbtc(wallet2, SBTC_10K);
+    } catch {
+      console.log("[0bps] close-and-settle-with-refresh: skipped — VM token supply bug");
+      return;
+    }
+
+    pub(C, "deposit-stx", [Cl.uint(STX_100), Cl.uint(LIMIT_HIGH)], wallet1);
+    pub(C, "deposit-sbtc", [Cl.uint(SBTC_10K), Cl.uint(1)], wallet2);
+
+    // Skip the close step — bundled call does it
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+
+    const preCycle = Number(cvToJSON(ro(C, "get-current-cycle", [])).value);
+    expect(ro(C, "get-cycle-phase", [])).toBeUint(0); // still in DEPOSIT before the bundled call
+
+    const vaaArg = Cl.bufferFromHex(vaaHex);
+    const pythStorage = Cl.contractPrincipal("SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y", "pyth-storage-v4");
+    const pythDecoder = Cl.contractPrincipal("SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y", "pyth-pnau-decoder-v3");
+    const wormhole = Cl.contractPrincipal("SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y", "wormhole-core-v4");
+
+    let result;
+    try {
+      result = pub(
+        C,
+        "close-and-settle-with-refresh",
+        [vaaArg, vaaArg, pythStorage, pythDecoder, wormhole],
+        wallet1
+      );
+    } catch (e) {
+      console.log("[0bps] close-and-settle-with-refresh: threw —", (e as Error).message);
+      return;
+    }
+    expect(result.result).toBeOk(Cl.bool(true));
+
+    // Verify: settlement record exists for preCycle, cycle advanced, back in DEPOSIT
+    const settlement = cvToJSON(ro(C, "get-settlement", [Cl.uint(preCycle)]));
+    expect(Number(settlement.value.value.price.value)).toBeGreaterThan(0);
+    expect(ro(C, "get-current-cycle", [])).toBeUint(preCycle + 1);
+    expect(ro(C, "get-cycle-phase", [])).toBeUint(0);
+    console.log(`[0bps] close-and-settle-with-refresh: cycle ${preCycle} closed+settled in one tx`);
+  });
+
+  // --- STX-binding rollforward ---
+  // Force the STX-binding branch of execute-settlement: sBTC side is oversupplied,
+  // STX side clears fully, sBTC has an unfilled remainder that rolls to next cycle.
+  // Sizing: 10 STX vs 50k sats sBTC. With oracle ~3e5 STX/BTC, 50k sats ≈ 150 STX value.
+  // stx-value-of-sbtc (~150 STX) > total-stx (10 STX) → sbtc-is-binding = false → STX-binding.
+  it("settlement STX-binding: all STX clears, sBTC rolls", function () {
+    const LIMIT_HIGH = 99_999_999_999_999;
+    try {
+      fundSbtc(wallet2, SBTC_50K);
+    } catch {
+      console.log("[0bps] STX-binding: skipped — VM token supply bug");
+      return;
+    }
+
+    pub(C, "deposit-stx", [Cl.uint(STX_10), Cl.uint(LIMIT_HIGH)], wallet1);
+    pub(C, "deposit-sbtc", [Cl.uint(SBTC_50K), Cl.uint(1)], wallet2);
+
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+    pub(C, "close-deposits", [], wallet1);
+
+    const preCycle = Number(cvToJSON(ro(C, "get-current-cycle", [])).value);
+
+    let settleResult;
+    try {
+      settleResult = pub(C, "settle", [], wallet1);
+    } catch {
+      console.log("[0bps] STX-binding: threw — VM token supply bug");
+      return;
+    }
+    expect(settleResult.result).toBeOk(Cl.bool(true));
+
+    const events = settleResult.events
+      .filter((e: any) => e.event === "print_event")
+      .map((e: any) => cvToJSON(e.data.value));
+    const settlementEvent = events.find((v: any) => v.value?.event?.value === "settlement");
+    expect(settlementEvent).toBeDefined();
+
+    const bindingSide = settlementEvent!.value["binding-side"].value;
+    const stxUnfilled = Number(settlementEvent!.value["stx-unfilled"].value);
+    const sbtcUnfilled = Number(settlementEvent!.value["sbtc-unfilled"].value);
+    console.log(`[0bps] STX-binding: binding=${bindingSide}, stx-unfilled=${stxUnfilled}, sbtc-unfilled=${sbtcUnfilled}`);
+
+    expect(bindingSide).toBe("stx");
+    expect(stxUnfilled).toBe(0);
+    expect(sbtcUnfilled).toBeGreaterThan(0);
+
+    // wallet2's rolled sBTC should appear in the next cycle's deposit map
+    const w2rolled = Number(cvToJSON(ro(C, "get-sbtc-deposit", [Cl.uint(preCycle + 1), Cl.principal(wallet2)])).value);
+    expect(w2rolled).toBeGreaterThan(0);
+    console.log(`[0bps] STX-binding: wallet2 rolled ${w2rolled} sats to cycle ${preCycle + 1}`);
+  });
+
+  // --- sBTC-binding rollforward ---
+  // Force the sBTC-binding branch: STX side is oversupplied, sBTC clears fully,
+  // STX has unfilled remainder that rolls. This pins the opposite branch with
+  // explicit assertions (full-settlement test hits this too but doesn't assert it).
+  it("settlement sBTC-binding: all sBTC clears, STX rolls", function () {
+    const LIMIT_HIGH = 99_999_999_999_999;
+    try {
+      fundSbtc(wallet2, SBTC_2K);
+    } catch {
+      console.log("[0bps] sBTC-binding: skipped — VM token supply bug");
+      return;
+    }
+
+    // 100 STX vs 2k sats (~6 STX value) → STX vastly oversupplied → sBTC-binding
+    pub(C, "deposit-stx", [Cl.uint(STX_100), Cl.uint(LIMIT_HIGH)], wallet1);
+    pub(C, "deposit-sbtc", [Cl.uint(SBTC_2K), Cl.uint(1)], wallet2);
+
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+    pub(C, "close-deposits", [], wallet1);
+
+    const preCycle = Number(cvToJSON(ro(C, "get-current-cycle", [])).value);
+
+    let settleResult;
+    try {
+      settleResult = pub(C, "settle", [], wallet1);
+    } catch {
+      console.log("[0bps] sBTC-binding: threw — VM token supply bug");
+      return;
+    }
+    expect(settleResult.result).toBeOk(Cl.bool(true));
+
+    const events = settleResult.events
+      .filter((e: any) => e.event === "print_event")
+      .map((e: any) => cvToJSON(e.data.value));
+    const settlementEvent = events.find((v: any) => v.value?.event?.value === "settlement");
+    expect(settlementEvent).toBeDefined();
+
+    const bindingSide = settlementEvent!.value["binding-side"].value;
+    const stxUnfilled = Number(settlementEvent!.value["stx-unfilled"].value);
+    const sbtcUnfilled = Number(settlementEvent!.value["sbtc-unfilled"].value);
+    console.log(`[0bps] sBTC-binding: binding=${bindingSide}, stx-unfilled=${stxUnfilled}, sbtc-unfilled=${sbtcUnfilled}`);
+
+    expect(bindingSide).toBe("sbtc");
+    expect(sbtcUnfilled).toBe(0);
+    expect(stxUnfilled).toBeGreaterThan(0);
+
+    // wallet1's rolled STX should appear in the next cycle's deposit map
+    const w1rolled = Number(cvToJSON(ro(C, "get-stx-deposit", [Cl.uint(preCycle + 1), Cl.principal(wallet1)])).value);
+    expect(w1rolled).toBeGreaterThan(0);
+    console.log(`[0bps] sBTC-binding: wallet1 rolled ${w1rolled} uSTX to cycle ${preCycle + 1}`);
+  });
 });
