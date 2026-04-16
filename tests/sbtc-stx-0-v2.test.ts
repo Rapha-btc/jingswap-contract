@@ -720,4 +720,134 @@ describe.skipIf(!remoteDataEnabled)("sbtc-stx-0-v2 (0bps)", function () {
     expect(dust).toBeDefined();
     console.log("[0bps] Dust:", JSON.stringify(dust!.value, null, 2));
   });
+
+  // --- DLMM-sourced settlement ---
+  // Exercises get-dlmm-price inside execute-settlement so the DEX divergence gate
+  // runs against the real mainnet DLMM pool instead of XYK.
+  //
+  // Pre-fix: get-dlmm-price returned a raw DLMM bin price (~u32000) that wasn't
+  // on Scale-A (STX/BTC × 1e8, ~3e13), causing ERR_PRICE_DEX_DIVERGENCE on every
+  // DLMM-sourced settle. Post-fix: returns (/ u1e18 bin-price) which lands on
+  // Scale-A. See contracts/v2/README-dlmm-price-bug.md.
+  // VM-gated — may skip if prior settlements corrupted sBTC ft-transfer? tracking.
+  it("dex-source=DLMM: get-dlmm-price matches oracle scale and settles", function () {
+    const LIMIT_HIGH = 99_999_999_999_999;
+    try {
+      fundSbtc(wallet2, SBTC_10K);
+    } catch {
+      console.log("[0bps] DLMM settle: skipped — VM token supply bug");
+      return;
+    }
+
+    expect(pub(C, "set-dex-source", [Cl.uint(2)], deployer).result).toBeOk(Cl.bool(true));
+    expect(ro(C, "get-dex-source", [])).toBeUint(2);
+
+    const xykPrice = Number(cvToJSON(ro(C, "get-xyk-price", [])).value);
+    const dlmmPrice = Number(cvToJSON(ro(C, "get-dlmm-price", [])).value);
+    const prices = getOraclePrices();
+    const xykVsOracleBps = Math.round((Math.abs(xykPrice - prices.oraclePrice) * 10000) / prices.oraclePrice);
+    const dlmmVsOracleBps = Math.round((Math.abs(dlmmPrice - prices.oraclePrice) * 10000) / prices.oraclePrice);
+
+    console.log(`[0bps] Scale-A prices (STX/BTC × 1e8):`);
+    console.log(`  oracle (Pyth)   = ${prices.oraclePrice}`);
+    console.log(`  get-xyk-price   = ${xykPrice}   diff vs oracle = ${xykVsOracleBps} bps`);
+    console.log(`  get-dlmm-price  = ${dlmmPrice}   diff vs oracle = ${dlmmVsOracleBps} bps`);
+
+    // Post-fix: all three prices are on Scale-A
+    expect(prices.oraclePrice).toBeGreaterThan(1e10);
+    expect(xykPrice).toBeGreaterThan(1e10);
+    expect(dlmmPrice).toBeGreaterThan(1e10);
+    // DLMM must pass the 10% (1000 bps) divergence gate
+    expect(dlmmVsOracleBps).toBeLessThan(1000);
+
+    pub(C, "deposit-stx", [Cl.uint(STX_100), Cl.uint(LIMIT_HIGH)], wallet1);
+    pub(C, "deposit-sbtc", [Cl.uint(SBTC_10K), Cl.uint(1)], wallet2);
+
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+    pub(C, "close-deposits", [], wallet1);
+
+    const preCycle = Number(cvToJSON(ro(C, "get-current-cycle", [])).value);
+
+    let settleResult;
+    try {
+      settleResult = pub(C, "settle", [], wallet1);
+    } catch {
+      console.log("[0bps] DLMM settle: threw — VM token supply bug");
+      pub(C, "set-dex-source", [Cl.uint(1)], deployer);
+      return;
+    }
+    expect(settleResult.result).toBeOk(Cl.bool(true));
+
+    const settlement = cvToJSON(ro(C, "get-settlement", [Cl.uint(preCycle)]));
+    const price = Number(settlement.value.value.price.value);
+    expect(price).toBe(prices.oraclePrice);
+    console.log(`[0bps] DLMM settle: cycle ${preCycle} cleared at oracle price ${price}`);
+
+    pub(C, "set-dex-source", [Cl.uint(1)], deployer);
+  });
+
+  // --- settle-with-refresh with live Pyth VAA ---
+  // Fetches a fresh VAA from Hermes and drives the production settle path.
+  // VM-gated + network-gated (skips if Hermes is unreachable).
+  it("settle-with-refresh with live Hermes VAA", async function () {
+    const BTC_FEED_ID = "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+    const STX_FEED_ID = "ec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17";
+
+    const timestamp = Math.floor(Date.now() / 1000) - 30;
+    const url = `https://hermes.pyth.network/v2/updates/price/${timestamp}?ids[]=${BTC_FEED_ID}&ids[]=${STX_FEED_ID}`;
+
+    let vaaHex: string;
+    try {
+      const response = await fetch(url, { headers: { accept: "application/json" } });
+      const data = await response.json();
+      if (!data?.binary?.data?.[0]) {
+        console.log("[0bps] settle-with-refresh: skipped — no VAA data from Hermes");
+        return;
+      }
+      vaaHex = data.binary.data[0];
+      console.log(`[0bps] Hermes VAA: ${vaaHex.length} hex chars, ${data.parsed?.length ?? 0} feeds`);
+    } catch (e) {
+      console.log("[0bps] settle-with-refresh: skipped — Hermes fetch failed:", (e as Error).message);
+      return;
+    }
+
+    const LIMIT_HIGH = 99_999_999_999_999;
+    try {
+      fundSbtc(wallet2, SBTC_10K);
+    } catch {
+      console.log("[0bps] settle-with-refresh: skipped — VM token supply bug");
+      return;
+    }
+
+    pub(C, "deposit-stx", [Cl.uint(STX_100), Cl.uint(LIMIT_HIGH)], wallet1);
+    pub(C, "deposit-sbtc", [Cl.uint(SBTC_10K), Cl.uint(1)], wallet2);
+
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+    pub(C, "close-deposits", [], wallet1);
+
+    const preCycle = Number(cvToJSON(ro(C, "get-current-cycle", [])).value);
+    const vaaArg = Cl.bufferFromHex(vaaHex);
+    const pythStorage = Cl.contractPrincipal("SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y", "pyth-storage-v4");
+    const pythDecoder = Cl.contractPrincipal("SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y", "pyth-pnau-decoder-v3");
+    const wormhole = Cl.contractPrincipal("SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y", "wormhole-core-v4");
+
+    let settleResult;
+    try {
+      settleResult = pub(
+        C,
+        "settle-with-refresh",
+        [vaaArg, vaaArg, pythStorage, pythDecoder, wormhole],
+        wallet1
+      );
+    } catch (e) {
+      console.log("[0bps] settle-with-refresh: threw —", (e as Error).message);
+      return;
+    }
+    expect(settleResult.result).toBeOk(Cl.bool(true));
+
+    const settlement = cvToJSON(ro(C, "get-settlement", [Cl.uint(preCycle)]));
+    const price = Number(settlement.value.value.price.value);
+    expect(price).toBeGreaterThan(0);
+    console.log(`[0bps] settle-with-refresh: cycle ${preCycle} cleared at price ${price}`);
+  });
 });

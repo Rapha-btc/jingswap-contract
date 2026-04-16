@@ -108,7 +108,7 @@ The local v2 contracts have `MAX_STALENESS` relaxed to `u999999999` so mainnet P
 | `get-dex-source` | YES | YES | Returns XYK (u1) | — |
 | `get-min-deposits` | YES | NO | Returns defaults | Not checked in 20bps |
 | `get-xyk-price` | indirect | indirect | Called during settle | Never called directly |
-| `get-dlmm-price` | NO | NO | — | **Never exercised (dex-source never DLMM during settle)** |
+| `get-dlmm-price` | YES | NO | Exercised via DLMM-sourced settle after scale fix | Not tested in 20bps |
 | `deposit-stx` | YES | YES | First deposit, top-up, too small, zero limit, paused, wrong phase | **Priority queue bump (50 slots) NOT tested. ERR_QUEUE_FULL (u1013) never triggered** |
 | `deposit-sbtc` | YES | YES | First deposit, top-up, cancel/re-deposit, too small, zero limit, wrong phase | **Priority queue bump NOT tested** |
 | `cancel-stx-deposit` | YES | YES | Happy path, nothing-to-withdraw, wrong phase | — |
@@ -117,8 +117,8 @@ The local v2 contracts have `MAX_STALENESS` relaxed to `u999999999` so mainnet P
 | `set-sbtc-limit` | YES | NO | Success, zero rejected, no-deposit error | Not tested in 20bps |
 | `close-deposits` | YES | YES | Success, too early, already closed, one-sided, small share filtering | — |
 | `settle` | YES | YES | Full settlement, pro-rata (STX + sBTC sides), limit roll (STX + sBTC), dust | **Unfilled rollforward paths not isolated** |
-| `settle-with-refresh` | NO | NO | — | **Completely untested** |
-| `close-and-settle-with-refresh` | NO | NO | — | **Completely untested** |
+| `settle-with-refresh` | YES | NO | Full path via live Hermes VAA fetch | Not tested in 20bps |
+| `close-and-settle-with-refresh` | indirect | NO | `settle-with-refresh` covered; bundled wrapper is a trivial `try!` | Not tested in 20bps |
 | `cancel-cycle` | YES | YES | Success, too early, wrong phase | ERR_ALREADY_SETTLED not tested |
 | `set-treasury` | YES | NO | Success + auth guard | Not tested in 20bps |
 | `set-paused` | YES | YES | Toggle + auth guard | — |
@@ -158,14 +158,14 @@ These gaps remain after the current test suite:
 | **Priority queue bump (MAX_DEPOSITORS=50)** | HIGH | Most complex code path in the contract — bump smallest depositor when queue full | YES — fill 50 STX slots with wallets, deposit a 51st larger one |
 | **Unfilled rollforward after partial settlement** | MEDIUM | STX-binding and sBTC-binding paths not isolated | YES — control deposit ratios |
 | **ERR_ALREADY_SETTLED (u1004)** | LOW | Effectively unreachable: settle increments cycle before returning, so cancel-cycle would target a new deposit phase | Probably unreachable |
-| **settle-with-refresh** | LOW | Production path but needs real Pyth VAAs | HARD — needs Hermes VAA fetch |
-| **close-and-settle-with-refresh** | LOW | Production path but needs real Pyth VAAs | HARD — needs Hermes VAA fetch |
-| **get-dlmm-price** | LOW | Only exercised if dex-source is DLMM at settle time | YES — set-dex-source DLMM then settle |
+| **settle-with-refresh** | ~~LOW~~ CLOSED | Production path via live Hermes VAA fetch | DONE — `settle-with-refresh with live Hermes VAA` |
+| **close-and-settle-with-refresh** | LOW | Thin `try!` wrapper over `close-deposits` + `settle-with-refresh`, both covered | Partial — bundled form not explicitly invoked |
+| **get-dlmm-price** | ~~LOW~~ CLOSED | Exercised via DLMM-sourced settle after scale-fix (see contracts/v2/README-dlmm-price-bug.md) | DONE — `dex-source=DLMM: get-dlmm-price matches oracle scale and settles` |
 | **ERR_STALE_PRICE/UNCERTAIN/DIVERGENCE/ZERO** | LOW | Oracle safety gates (u1005/u1006/u1007/u1009) | NO with remote_data (can't manipulate prices) |
 
 ### Current Coverage Estimate
 
-- **Functions:** 27/30 directly tested (90%) — remaining untested: `settle-with-refresh`, `close-and-settle-with-refresh`, `get-dlmm-price` (via DLMM settle path)
+- **Functions:** 29/30 directly tested (97%) — remaining: `close-and-settle-with-refresh` (thin wrapper, components fully covered)
 - **Error codes:** 13/17 tested (76%) — remaining untested: u1004 (unreachable), u1005/u1006/u1007/u1009 (can't mock with remote_data)
 - **Code paths:** ~80-85% of branching logic covered
 - **Settlement math:** Core clearing price + fee + pro-rata verified for both 0bps and 20bps

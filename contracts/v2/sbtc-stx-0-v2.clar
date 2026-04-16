@@ -776,13 +776,17 @@
     get-pool))))
     (/ (* (get y-balance pool) u100 PRICE_PRECISION) (get x-balance pool))))
 
+;; DLMM bin-price is quoted as (BTC/STX) * 1e10; we need (STX/BTC) * 1e8 (Scale-A).
+;; 1e18 / bin-price inverts the direction and rescales in one step.
+;; See contracts/v2/README-dlmm-price-bug.md for derivation and safety analysis.
 (define-read-only (get-dlmm-price)
   (let ((pool (unwrap-panic (contract-call?
     'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15
-    get-pool))))
-    (unwrap-panic (contract-call?
-      'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
-      get-bin-price (get initial-price pool) (get bin-step pool) (get active-bin-id pool)))))
+    get-pool)))
+        (bin-price (unwrap-panic (contract-call?
+          'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
+          get-bin-price (get initial-price pool) (get bin-step pool) (get active-bin-id pool)))))
+    (/ u1000000000000000000 bin-price)))
 
 (define-public (set-treasury (new-treasury principal))
   (begin
