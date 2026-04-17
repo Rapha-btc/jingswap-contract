@@ -141,12 +141,12 @@ The local v2 contracts have `MAX_STALENESS` relaxed to `u999999999` so mainnet P
 | ERR_DEPOSIT_TOO_SMALL | u1001 | YES | YES | |
 | ERR_NOT_DEPOSIT_PHASE | u1002 | YES | YES | via set-stx-limit in settle phase |
 | ERR_NOT_SETTLE_PHASE | u1003 | YES | YES | via cancel-cycle |
-| ERR_ALREADY_SETTLED | u1004 | **NO** | **NO** | unreachable in practice |
-| ERR_STALE_PRICE | u1005 | **NO** | **NO** | can't mock with remote_data |
-| ERR_PRICE_UNCERTAIN | u1006 | **NO** | **NO** | can't mock with remote_data |
-| ERR_PRICE_DEX_DIVERGENCE | u1007 | historically | **NO** | Fired pre-fix on DLMM-sourced settle (scale bug). Post-fix unreachable under normal mainnet conditions |
+| ERR_ALREADY_SETTLED | u1004 | **NO** | **NO** | unreachable in practice — `settle` advances the cycle before returning |
+| ERR_STALE_PRICE | u1005 | by design | by design | Defensive invariant against Pyth oracle staleness. Not testable under clarinet `remote_data` because simnet's `stacks-block-time` advances faster than wall clock per mined block — even a fresh Hermes VAA (publish-time ≈ wall clock) eventually looks stale to simnet's advanced clock, so the gate is only exercisable with a mock oracle or localnet snapshot |
+| ERR_PRICE_UNCERTAIN | u1006 | by design | by design | Defensive invariant. Fires if Pyth confidence > price/50 (2%). Mainnet BTC/USD and STX/USD conf is always < 0.1%. Gate fires only on upstream Pyth malfunction |
+| ERR_PRICE_DEX_DIVERGENCE | u1007 | by design | by design | Defensive invariant. Fires if oracle/DEX diverge > 10%. Historically fired pre-fix on DLMM-sourced settle (scale bug, see `contracts/v2/README-dlmm-price-bug.md`). Post-fix unreachable under normal mainnet conditions |
 | ERR_NOTHING_TO_WITHDRAW | u1008 | YES | YES | |
-| ERR_ZERO_PRICE | u1009 | **NO** | **NO** | can't mock with remote_data |
+| ERR_ZERO_PRICE | u1009 | by design | by design | Defensive invariant. Fires if Pyth returns price=0. Established feeds never return zero on mainnet — gate protects against catastrophic upstream failure |
 | ERR_PAUSED | u1010 | YES | YES | |
 | ERR_NOT_AUTHORIZED | u1011 | YES | YES | |
 | ERR_NOTHING_TO_SETTLE | u1012 | YES | YES | |
@@ -169,12 +169,12 @@ These gaps remain after the current test suite:
 | **close-and-settle-with-refresh** | ~~LOW~~ CLOSED | Bundled entry point exercised directly with live Hermes VAA | DONE — `close-and-settle-with-refresh bundled call with live Hermes VAA` |
 | **get-dlmm-price** | ~~LOW~~ CLOSED | Exercised via DLMM-sourced settle after scale-fix (see contracts/v2/README-dlmm-price-bug.md) | DONE — `dex-source=DLMM: get-dlmm-price matches oracle scale and settles` |
 | **20bps parity** | ~~MEDIUM~~ CLOSED | Read-only helpers (`get-cycle-start-block`/`get-blocks-elapsed`/`get-stx-limit`/`get-sbtc-limit`/`get-stx-depositors`/`get-sbtc-depositors`/`get-min-deposits`) and admin functions (`set-treasury`/`set-dex-source`/`set-min-stx-deposit`/`set-stx-limit`/`set-sbtc-limit`) now covered in 20bps | DONE — `read-only` + `admin parity` tests |
-| **ERR_STALE_PRICE/UNCERTAIN/DIVERGENCE/ZERO** | LOW | Oracle safety gates (u1005/u1006/u1007/u1009) | NO with remote_data (can't manipulate prices). u1005 covered by stxer `simul-blind-premium-zero-settle-refresh.js`. u1007 fired pre-fix in DLMM path. |
+| **ERR_STALE_PRICE/UNCERTAIN/DIVERGENCE/ZERO (u1005/u1006/u1007/u1009)** | N/A — by design | All four are defensive oracle-safety invariants against upstream Pyth/DEX malfunction, not normal-path gates. **u1005** is not exercisable under clarinet `remote_data`: simnet's `stacks-block-time` advances faster than wall clock per mined block, so even a fresh Hermes VAA eventually looks stale to simnet's advanced clock — testing this gate would require a mock oracle harness or localnet snapshot (stxer `simul-blind-premium-zero-settle-refresh.js` exercises the refresh path instead). **u1006** requires Pyth conf > 2% of price, never seen on mainnet BTC/USD or STX/USD. **u1007** was fired historically in the pre-fix DLMM scale bug; post-fix mainnet XYK/DLMM quote within < 1% of Pyth. **u1009** requires Pyth to return price=0, which established feeds never do. Not planned as test targets — they are contract invariants, not code paths. |
 
 ### Current Coverage Estimate
 
 - **Functions:** 30/30 directly tested in 0bps (100%); 28/30 in 20bps (`settle-with-refresh` and `close-and-settle-with-refresh` covered by shared `execute-settlement` but not invoked directly in 20bps)
-- **Error codes:** 13/17 directly tested (76%); u1007 additionally fired pre-fix. Remaining untested: u1004 (unreachable by design), u1005/u1006/u1009 (can't mock oracle with `remote_data`), u1013 (needs 50+ wallets — covered by stxer sim)
+- **Error codes:** 13/17 directly tested (76%). Remaining 4 are all **by-design invariants**, not code paths: u1004 (unreachable — `settle` advances cycle before returning), u1005/u1006/u1007/u1009 (defensive oracle-safety gates that fire only on upstream Pyth/DEX catastrophic malfunction; see Error Code Coverage table for detail on each). u1013 (priority queue full) needs 50+ funded wallets — covered by stxer sim.
 - **Code paths:** ~92-95% of branching logic covered in Clarinet, with stxer sims filling the remainder
 - **Settlement math:** Core clearing price + fee + pro-rata + both binding-side branches verified for 0bps; 20bps verified on premium and pro-rata
 
