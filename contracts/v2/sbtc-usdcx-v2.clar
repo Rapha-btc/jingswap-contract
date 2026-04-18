@@ -1,14 +1,14 @@
-;; SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-usdcx-jing-v2 this is a v1 contract but a v1.2 version (not a v2 contract)
+;; sbtc-usdcx-jing-v2 with limit-pricing (ported from sbtc-stx v1->v2 diff).
+;; Oracle-price is BTC/USD from Pyth (8-dec), same unit as user-supplied limit.
+;; STX feed is only used (and validated) when dex-source is XYK.
 (use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
 
-(define-constant DEPOSIT_MIN_BLOCKS u150)
-(define-constant BUFFER_BLOCKS u30)
-(define-constant CANCEL_THRESHOLD u500)
+(define-constant DEPOSIT_MIN_BLOCKS u10)
+(define-constant CANCEL_THRESHOLD u42)
 
 (define-constant PHASE_DEPOSIT u0)
-(define-constant PHASE_BUFFER u1)
 (define-constant PHASE_SETTLE u2)
 
 (define-constant MAX_DEPOSITORS u50)
@@ -22,12 +22,14 @@
 
 (define-constant BTC_USD_FEED 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43)
 (define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
-(define-constant MAX_STALENESS u60)
+
+(define-constant MAX_STALENESS u999999999)
 (define-constant MAX_CONF_RATIO u50)
 (define-constant MAX_DEX_DEVIATION u10)
 
 (define-constant DEX_SOURCE_XYK u1)
 (define-constant DEX_SOURCE_DLMM u2)
+
 (define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
 (define-constant ERR_NOT_DEPOSIT_PHASE (err u1002))
 (define-constant ERR_NOT_SETTLE_PHASE (err u1003))
@@ -44,6 +46,7 @@
 (define-constant ERR_CANCEL_TOO_EARLY (err u1014))
 (define-constant ERR_CLOSE_TOO_EARLY (err u1015))
 (define-constant ERR_ALREADY_CLOSED (err u1016))
+(define-constant ERR_LIMIT_REQUIRED (err u1017))
 
 (define-data-var treasury principal tx-sender)
 (define-data-var contract-owner principal tx-sender)
@@ -69,6 +72,8 @@
 (define-data-var acc-usdcx-out uint u0)
 (define-data-var acc-usdcx-rolled uint u0)
 (define-data-var acc-sbtc-rolled uint u0)
+
+(define-data-var settle-clearing-price uint u0)
 
 (define-map usdcx-deposits
   { cycle: uint, depositor: principal }
@@ -99,6 +104,9 @@
     sbtc-fee: uint,
     settled-at: uint })
 
+(define-map usdcx-deposit-limits principal uint)
+(define-map sbtc-deposit-limits principal uint)
+
 (define-read-only (get-current-cycle)
   (var-get current-cycle))
 
@@ -112,9 +120,7 @@
   (let ((closed-block (var-get deposits-closed-block)))
     (if (is-eq closed-block u0)
       PHASE_DEPOSIT
-      (if (< stacks-block-height (+ closed-block BUFFER_BLOCKS))
-        PHASE_BUFFER
-        PHASE_SETTLE))))
+      PHASE_SETTLE)))
 
 (define-read-only (get-cycle-totals (cycle uint))
   (default-to { total-usdcx: u0, total-sbtc: u0 }
@@ -140,6 +146,12 @@
 
 (define-read-only (get-min-deposits)
   { min-usdcx: (var-get min-usdcx-deposit), min-sbtc: (var-get min-sbtc-deposit) })
+
+(define-read-only (get-usdcx-limit (depositor principal))
+  (default-to u0 (map-get? usdcx-deposit-limits depositor)))
+
+(define-read-only (get-sbtc-limit (depositor principal))
+  (default-to u0 (map-get? sbtc-deposit-limits depositor)))
 
 (define-private (advance-cycle)
   (begin
@@ -168,6 +180,7 @@
 
 (define-private (not-eq-bumped-sbtc (entry principal))
   (not (is-eq entry (var-get bumped-sbtc-principal))))
+
 (define-private (roll-usdcx-depositor (depositor principal))
   (let ((cycle (var-get current-cycle)))
     (map-set usdcx-deposits { cycle: (+ cycle u1), depositor: depositor }
@@ -179,6 +192,7 @@
     (map-set sbtc-deposits { cycle: (+ cycle u1), depositor: depositor }
       (get-sbtc-deposit cycle depositor))
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })))
+
 (define-private (roll-depositor-lists (cycle uint))
   (begin
     (map-set usdcx-depositor-list (+ cycle u1) (get-usdcx-depositors cycle))
@@ -186,7 +200,7 @@
     (map-delete usdcx-depositor-list cycle)
     (map-delete sbtc-depositor-list cycle)))
 
-(define-public (deposit-usdcx (amount uint))
+(define-public (deposit-usdcx (amount uint) (limit-price uint))
   (let (
     (cycle (var-get current-cycle))
     (existing (get-usdcx-deposit cycle tx-sender))
@@ -196,6 +210,7 @@
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-usdcx-deposit)) ERR_DEPOSIT_TOO_SMALL)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
 
     (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
       (let (
@@ -214,26 +229,29 @@
         (map-set usdcx-depositor-list cycle
           (unwrap-panic (as-max-len? (append (filter not-eq-bumped-usdcx depositors) tx-sender) u50)))
         (map-delete usdcx-deposits { cycle: cycle, depositor: smallest-who })
+        (map-delete usdcx-deposit-limits smallest-who)
         (map-set usdcx-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (map-set usdcx-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-usdcx: (+ (- (get total-usdcx totals) smallest-amount) amount) }))
-        (print { event: "deposit-usdcx", depositor: tx-sender, amount: amount, cycle: cycle,
+        (print { event: "deposit-usdcx", depositor: tx-sender, amount: amount, limit: limit-price, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
         (ok amount))
       (begin
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
           transfer amount tx-sender current-contract none))
         (map-set usdcx-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
+        (map-set usdcx-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-usdcx: (+ (get total-usdcx totals) amount) }))
         (if (is-eq existing u0)
           (map-set usdcx-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
-        (print { event: "deposit-usdcx", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
+        (print { event: "deposit-usdcx", depositor: tx-sender, amount: (+ existing amount), limit: limit-price, cycle: cycle })
         (ok amount)))))
 
-(define-public (deposit-sbtc (amount uint))
+(define-public (deposit-sbtc (amount uint) (limit-price uint))
   (let (
     (cycle (var-get current-cycle))
     (existing (get-sbtc-deposit cycle tx-sender))
@@ -243,6 +261,7 @@
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
     (asserts! (>= amount (var-get min-sbtc-deposit)) ERR_DEPOSIT_TOO_SMALL)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
     (if (and (is-eq existing u0) (>= (len depositors) MAX_DEPOSITORS))
       (let (
         (smallest-info (fold find-smallest-sbtc-fold depositors
@@ -260,23 +279,26 @@
         (map-set sbtc-depositor-list cycle
           (unwrap-panic (as-max-len? (append (filter not-eq-bumped-sbtc depositors) tx-sender) u50)))
         (map-delete sbtc-deposits { cycle: cycle, depositor: smallest-who })
+        (map-delete sbtc-deposit-limits smallest-who)
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } amount)
+        (map-set sbtc-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, cycle: cycle,
+        (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, limit: limit-price, cycle: cycle,
                  bumped: smallest-who, bumped-amount: smallest-amount })
         (ok amount))
       (begin
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer amount tx-sender current-contract none))
         (map-set sbtc-deposits { cycle: cycle, depositor: tx-sender } (+ existing amount))
+        (map-set sbtc-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (get total-sbtc totals) amount) }))
         (if (is-eq existing u0)
           (map-set sbtc-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), cycle: cycle })
+        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), limit: limit-price, cycle: cycle })
         (ok amount)))))
 
 (define-public (cancel-usdcx-deposit)
@@ -292,6 +314,7 @@
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
                     transfer amount current-contract caller none))))
     (map-delete usdcx-deposits { cycle: cycle, depositor: caller })
+    (map-delete usdcx-deposit-limits caller)
     (var-set bumped-usdcx-principal caller)
     (map-set usdcx-depositor-list cycle (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
     (map-set cycle-totals cycle
@@ -312,12 +335,33 @@
       (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
         transfer amount current-contract caller none))))
     (map-delete sbtc-deposits { cycle: cycle, depositor: caller })
+    (map-delete sbtc-deposit-limits caller)
     (var-set bumped-sbtc-principal caller)
     (map-set sbtc-depositor-list cycle (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
     (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
     (ok amount)))
+
+(define-public (set-usdcx-limit (limit-price uint))
+  (begin
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
+    (asserts! (> (get-usdcx-deposit (var-get current-cycle) tx-sender) u0)
+              ERR_NOTHING_TO_WITHDRAW)
+    (map-set usdcx-deposit-limits tx-sender limit-price)
+    (print { event: "set-usdcx-limit", depositor: tx-sender, limit: limit-price })
+    (ok true)))
+
+(define-public (set-sbtc-limit (limit-price uint))
+  (begin
+    (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_NOT_DEPOSIT_PHASE)
+    (asserts! (> limit-price u0) ERR_LIMIT_REQUIRED)
+    (asserts! (> (get-sbtc-deposit (var-get current-cycle) tx-sender) u0)
+              ERR_NOTHING_TO_WITHDRAW)
+    (map-set sbtc-deposit-limits tx-sender limit-price)
+    (print { event: "set-sbtc-limit", depositor: tx-sender, limit: limit-price })
+    (ok true)))
 
 (define-private (filter-small-usdcx-depositor (depositor principal))
   (let (
@@ -370,6 +414,68 @@
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (- total-sbtc amount) }))
         (print { event: "small-share-roll-sbtc", depositor: depositor, cycle: cycle, amount: amount })
+        (ok true))
+      (ok true))))
+
+;; USDCx-side depositor is buying sBTC with USDCx; roll if clearing (USDCx/BTC * 1e8)
+;; exceeds the price they were willing to pay.
+(define-private (filter-limit-violating-usdcx-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (totals (get-cycle-totals cycle))
+    (amount (get-usdcx-deposit cycle depositor))
+    (next-cycle (+ cycle u1))
+    (totals-next (get-cycle-totals next-cycle))
+    (limit (get-usdcx-limit depositor))
+    (clearing (var-get settle-clearing-price))
+  )
+    (if (> clearing limit)
+      (begin
+        (map-set usdcx-deposits { cycle: next-cycle, depositor: depositor } amount)
+        (map-set usdcx-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-usdcx-depositors next-cycle) depositor) u50)))
+        (map-set cycle-totals next-cycle
+          (merge totals-next
+            { total-usdcx: (+ (get total-usdcx totals-next) amount) }))
+        (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-usdcx-principal depositor)
+        (map-set usdcx-depositor-list cycle
+          (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge totals { total-usdcx: (- (get total-usdcx totals) amount) }))
+        (print { event: "limit-roll-usdcx", depositor: depositor, cycle: cycle,
+                 amount: amount, limit: limit, clearing: clearing })
+        (ok true))
+      (ok true))))
+
+;; sBTC-side depositor is selling sBTC for USDCx; roll if clearing falls below
+;; the minimum price they were willing to sell at.
+(define-private (filter-limit-violating-sbtc-depositor (depositor principal))
+  (let (
+    (cycle (var-get current-cycle))
+    (totals (get-cycle-totals cycle))
+    (amount (get-sbtc-deposit cycle depositor))
+    (next-cycle (+ cycle u1))
+    (totals-next (get-cycle-totals next-cycle))
+    (limit (get-sbtc-limit depositor))
+    (clearing (var-get settle-clearing-price))
+  )
+    (if (< clearing limit)
+      (begin
+        (map-set sbtc-deposits { cycle: next-cycle, depositor: depositor } amount)
+        (map-set sbtc-depositor-list next-cycle
+          (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
+        (map-set cycle-totals next-cycle
+          (merge totals-next
+            { total-sbtc: (+ (get total-sbtc totals-next) amount) }))
+        (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
+        (var-set bumped-sbtc-principal depositor)
+        (map-set sbtc-depositor-list cycle
+          (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
+        (map-set cycle-totals cycle
+          (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
+        (print { event: "limit-roll-sbtc", depositor: depositor, cycle: cycle,
+                 amount: amount, limit: limit, clearing: clearing })
         (ok true))
       (ok true))))
 
@@ -456,6 +562,17 @@
       (advance-cycle)
       (ok true))))
 
+(define-public (close-and-settle-with-refresh
+  (btc-vaa (buff 8192))
+  (stx-vaa (buff 8192))
+  (pyth-storage <pyth-storage-trait>)
+  (pyth-decoder <pyth-decoder-trait>)
+  (wormhole-core <wormhole-core-trait>))
+  (begin
+    (try! (close-deposits))
+    (try! (settle-with-refresh btc-vaa stx-vaa pyth-storage pyth-decoder wormhole-core))
+    (ok true)))
+
 (define-public (cancel-cycle)
   (let (
     (cycle (var-get current-cycle))
@@ -463,8 +580,7 @@
     (totals (get-cycle-totals cycle))
   )
     (asserts! (> closed-block u0) ERR_NOT_SETTLE_PHASE)
-    (asserts! (>= stacks-block-height
-                  (+ closed-block BUFFER_BLOCKS CANCEL_THRESHOLD))
+    (asserts! (>= stacks-block-height (+ closed-block CANCEL_THRESHOLD))
               ERR_CANCEL_TOO_EARLY)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
     (map-set cycle-totals (+ cycle u1) totals)
@@ -485,32 +601,17 @@
   (stx-feed { price: int, conf: uint, expo: int, ema-price: int,
               ema-conf: uint, publish-time: uint, prev-publish-time: uint }))
   (let (
-    (totals (get-cycle-totals cycle))
-    (total-usdcx (get total-usdcx totals))
-    (total-sbtc (get total-sbtc totals))
     (btc-price (to-uint (get price btc-feed)))
     (stx-price (to-uint (get price stx-feed)))
     (oracle-price btc-price)
     (dex-price (get-dex-price stx-price))
-    (usdcx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
-    (sbtc-is-binding (<= usdcx-value-of-sbtc total-usdcx))
-    (usdcx-clearing (if sbtc-is-binding usdcx-value-of-sbtc total-usdcx))
-    (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-usdcx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
-    (usdcx-fee (/ (* usdcx-clearing FEE_BPS) BPS_PRECISION))
-    (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
-    (usdcx-unfilled (- total-usdcx usdcx-clearing))
-    (sbtc-unfilled (- total-sbtc sbtc-clearing))
     (min-freshness (- stacks-block-time MAX_STALENESS))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-    (asserts! (and (>= total-usdcx (var-get min-usdcx-deposit))
-                   (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (asserts! (> btc-price u0) ERR_ZERO_PRICE)
-
     (asserts! (> (get publish-time btc-feed) min-freshness) ERR_STALE_PRICE)
-
     (asserts! (< (get conf btc-feed) (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
 
     (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
@@ -525,6 +626,24 @@
                     (- oracle-price dex-price) (- dex-price oracle-price))
                  (/ oracle-price MAX_DEX_DEVIATION)) ERR_PRICE_DEX_DIVERGENCE)
 
+    (var-set settle-clearing-price oracle-price)
+    (map filter-limit-violating-usdcx-depositor (get-usdcx-depositors cycle))
+    (map filter-limit-violating-sbtc-depositor (get-sbtc-depositors cycle))
+    (let (
+      (totals (get-cycle-totals cycle))
+      (total-usdcx (get total-usdcx totals))
+      (total-sbtc (get total-sbtc totals))
+      (usdcx-value-of-sbtc (/ (* total-sbtc oracle-price) (* PRICE_PRECISION DECIMAL_FACTOR)))
+      (sbtc-is-binding (<= usdcx-value-of-sbtc total-usdcx))
+      (usdcx-clearing (if sbtc-is-binding usdcx-value-of-sbtc total-usdcx))
+      (sbtc-clearing (if sbtc-is-binding total-sbtc (/ (* total-usdcx (* PRICE_PRECISION DECIMAL_FACTOR)) oracle-price)))
+      (usdcx-fee (/ (* usdcx-clearing FEE_BPS) BPS_PRECISION))
+      (sbtc-fee (/ (* sbtc-clearing FEE_BPS) BPS_PRECISION))
+      (usdcx-unfilled (- total-usdcx usdcx-clearing))
+      (sbtc-unfilled (- total-sbtc sbtc-clearing))
+    )
+    (asserts! (and (>= total-usdcx (var-get min-usdcx-deposit))
+                   (>= total-sbtc (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (map-set settlements cycle
       { price: oracle-price,
         usdcx-cleared: usdcx-clearing,
@@ -532,7 +651,6 @@
         usdcx-fee: usdcx-fee,
         sbtc-fee: sbtc-fee,
         settled-at: stacks-block-height })
-
     (if (> usdcx-fee u0)
       (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" usdcx-fee))
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
@@ -543,7 +661,6 @@
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
          transfer sbtc-fee current-contract (var-get treasury) none))))
       true)
-
     (var-set settle-usdcx-cleared usdcx-clearing)
     (var-set settle-sbtc-cleared sbtc-clearing)
     (var-set settle-total-usdcx total-usdcx)
@@ -553,7 +670,8 @@
     (print {
       event: "settlement",
       cycle: cycle,
-      price: oracle-price,
+      oracle-price: oracle-price,
+      clearing-price: oracle-price,
       usdcx-cleared: usdcx-clearing,
       sbtc-cleared: sbtc-clearing,
       usdcx-unfilled: usdcx-unfilled,
@@ -562,7 +680,7 @@
       sbtc-fee: sbtc-fee,
       binding-side: (if sbtc-is-binding "sbtc" "usdcx")
     })
-    (ok true)))
+    (ok true))))
 
 (define-private (distribute-to-usdcx-depositor (depositor principal))
   (let (
@@ -588,7 +706,9 @@
         (map-set usdcx-depositor-list next-cycle
               (unwrap-panic (as-max-len? (append (get-usdcx-depositors next-cycle) depositor) u50)))
         true)
-      true)
+      (begin
+        (map-delete usdcx-deposit-limits depositor)
+        true))
     (print {
       event: "distribute-usdcx-depositor",
       depositor: depositor,
@@ -622,7 +742,9 @@
         (map-set sbtc-depositor-list next-cycle
           (unwrap-panic (as-max-len? (append (get-sbtc-depositors next-cycle) depositor) u50)))
         true)
-      true)
+      (begin
+        (map-delete sbtc-deposit-limits depositor)
+        true))
     (print {
       event: "distribute-sbtc-depositor",
       depositor: depositor,
@@ -682,6 +804,10 @@
     get-pool))))
     (/ (* (get y-balance pool) u100 PRICE_PRECISION) (get x-balance pool))))
 
+;; NOTE: Unlike sbtc-stx-0-v2 (which inverts via 1e18/bin-price), the
+;; sBTC/USDCx DLMM pool has not been re-scale-audited here. Before flipping
+;; dex-source to DLMM, verify bin-price units match the BTC/USD * 1e8 oracle
+;; scale. See contracts/v2/README-dlmm-price-bug.md for the derivation.
 (define-read-only (get-dlmm-price)
   (let ((pool (unwrap-panic (contract-call?
     'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10
