@@ -30,6 +30,11 @@
 (define-constant DEX_SOURCE_XYK u1)
 (define-constant DEX_SOURCE_DLMM u2)
 
+;; Token pair -- passed to jing-core on every log-* call so the registry
+;; can aggregate across markets without hard-coding assets.
+(define-constant TOKEN_X 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
+(define-constant TOKEN_Y 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx)
+
 (define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
 (define-constant ERR_NOT_DEPOSIT_PHASE (err u1002))
 (define-constant ERR_NOT_SETTLE_PHASE (err u1003))
@@ -234,8 +239,10 @@
         (map-set usdcx-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-usdcx: (+ (- (get total-usdcx totals) smallest-amount) amount) }))
-        (print { event: "deposit-usdcx", depositor: tx-sender, amount: amount, limit: limit-price, cycle: cycle,
-                 bumped: smallest-who, bumped-amount: smallest-amount })
+        (try! (contract-call? .jing-core log-deposit-y
+                tx-sender amount amount limit-price cycle
+                (some smallest-who) smallest-amount
+                TOKEN_X TOKEN_Y))
         (ok amount))
       (begin
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
@@ -248,7 +255,10 @@
           (map-set usdcx-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
-        (print { event: "deposit-usdcx", depositor: tx-sender, amount: (+ existing amount), limit: limit-price, cycle: cycle })
+        (try! (contract-call? .jing-core log-deposit-y
+                tx-sender (+ existing amount) amount limit-price cycle
+                none u0
+                TOKEN_X TOKEN_Y))
         (ok amount)))))
 
 (define-public (deposit-sbtc (amount uint) (limit-price uint))
@@ -284,8 +294,10 @@
         (map-set sbtc-deposit-limits tx-sender limit-price)
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (+ (- (get total-sbtc totals) smallest-amount) amount) }))
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: amount, limit: limit-price, cycle: cycle,
-                 bumped: smallest-who, bumped-amount: smallest-amount })
+        (try! (contract-call? .jing-core log-deposit-x
+                tx-sender amount amount limit-price cycle
+                (some smallest-who) smallest-amount
+                TOKEN_X TOKEN_Y))
         (ok amount))
       (begin
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -298,7 +310,10 @@
           (map-set sbtc-depositor-list cycle
             (unwrap-panic (as-max-len? (append depositors tx-sender) u50)))
           true)
-        (print { event: "deposit-sbtc", depositor: tx-sender, amount: (+ existing amount), limit: limit-price, cycle: cycle })
+        (try! (contract-call? .jing-core log-deposit-x
+                tx-sender (+ existing amount) amount limit-price cycle
+                none u0
+                TOKEN_X TOKEN_Y))
         (ok amount)))))
 
 (define-public (cancel-usdcx-deposit)
@@ -319,7 +334,8 @@
     (map-set usdcx-depositor-list cycle (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-usdcx: (- (get total-usdcx totals) amount) }))
-    (print { event: "refund-usdcx", depositor: caller, amount: amount, cycle: cycle })
+    (try! (contract-call? .jing-core log-refund-y
+            caller amount cycle TOKEN_X TOKEN_Y))
     (ok amount)))
 
 (define-public (cancel-sbtc-deposit)
@@ -340,7 +356,8 @@
     (map-set sbtc-depositor-list cycle (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
     (map-set cycle-totals cycle
       (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
-    (print { event: "refund-sbtc", depositor: caller, amount: amount, cycle: cycle })
+    (try! (contract-call? .jing-core log-refund-x
+            caller amount cycle TOKEN_X TOKEN_Y))
     (ok amount)))
 
 (define-public (set-usdcx-limit (limit-price uint))
@@ -350,7 +367,8 @@
     (asserts! (> (get-usdcx-deposit (var-get current-cycle) tx-sender) u0)
               ERR_NOTHING_TO_WITHDRAW)
     (map-set usdcx-deposit-limits tx-sender limit-price)
-    (print { event: "set-usdcx-limit", depositor: tx-sender, limit: limit-price })
+    (try! (contract-call? .jing-core log-set-limit-y
+            tx-sender limit-price TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-public (set-sbtc-limit (limit-price uint))
@@ -360,7 +378,8 @@
     (asserts! (> (get-sbtc-deposit (var-get current-cycle) tx-sender) u0)
               ERR_NOTHING_TO_WITHDRAW)
     (map-set sbtc-deposit-limits tx-sender limit-price)
-    (print { event: "set-sbtc-limit", depositor: tx-sender, limit: limit-price })
+    (try! (contract-call? .jing-core log-set-limit-x
+            tx-sender limit-price TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-private (filter-small-usdcx-depositor (depositor principal))
@@ -386,7 +405,8 @@
           (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
         (map-set cycle-totals cycle
           (merge totals { total-usdcx: (- total-usdcx amount) }))
-        (print { event: "small-share-roll-usdcx", depositor: depositor, cycle: cycle, amount: amount })
+        (try! (contract-call? .jing-core log-small-share-roll-y
+                depositor cycle amount TOKEN_X TOKEN_Y))
         (ok true))
       (ok true))))
 
@@ -413,7 +433,8 @@
           (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (- total-sbtc amount) }))
-        (print { event: "small-share-roll-sbtc", depositor: depositor, cycle: cycle, amount: amount })
+        (try! (contract-call? .jing-core log-small-share-roll-x
+                depositor cycle amount TOKEN_X TOKEN_Y))
         (ok true))
       (ok true))))
 
@@ -443,8 +464,8 @@
           (filter not-eq-bumped-usdcx (get-usdcx-depositors cycle)))
         (map-set cycle-totals cycle
           (merge totals { total-usdcx: (- (get total-usdcx totals) amount) }))
-        (print { event: "limit-roll-usdcx", depositor: depositor, cycle: cycle,
-                 amount: amount, limit: limit, clearing: clearing })
+        (try! (contract-call? .jing-core log-limit-roll-y
+                depositor cycle amount limit clearing TOKEN_X TOKEN_Y))
         (ok true))
       (ok true))))
 
@@ -474,8 +495,8 @@
           (filter not-eq-bumped-sbtc (get-sbtc-depositors cycle)))
         (map-set cycle-totals cycle
           (merge totals { total-sbtc: (- (get total-sbtc totals) amount) }))
-        (print { event: "limit-roll-sbtc", depositor: depositor, cycle: cycle,
-                 amount: amount, limit: limit, clearing: clearing })
+        (try! (contract-call? .jing-core log-limit-roll-x
+                depositor cycle amount limit clearing TOKEN_X TOKEN_Y))
         (ok true))
       (ok true))))
 
@@ -492,10 +513,8 @@
     (map filter-small-usdcx-depositor (get-usdcx-depositors cycle))
     (map filter-small-sbtc-depositor (get-sbtc-depositors cycle))
     (var-set deposits-closed-block stacks-block-height)
-    (print { event: "close-deposits",
-             cycle: cycle,
-             closed-at-block: stacks-block-height,
-             elapsed-blocks: elapsed })
+    (try! (contract-call? .jing-core log-close-deposits
+            cycle stacks-block-height elapsed TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-public (settle)
@@ -589,9 +608,9 @@
     (map roll-sbtc-depositor (get-sbtc-depositors cycle))
     (roll-depositor-lists cycle)
     (advance-cycle)
-    (print { event: "cancel-cycle", cycle: cycle,
-             usdcx-rolled: (get total-usdcx totals),
-             sbtc-rolled: (get total-sbtc totals) })
+    (try! (contract-call? .jing-core log-cancel-cycle
+            cycle (get total-sbtc totals) (get total-usdcx totals)
+            TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-private (execute-settlement
@@ -667,19 +686,13 @@
     (var-set settle-total-sbtc total-sbtc)
     (var-set settle-sbtc-after-fee (- sbtc-clearing sbtc-fee))
     (var-set settle-usdcx-after-fee (- usdcx-clearing usdcx-fee))
-    (print {
-      event: "settlement",
-      cycle: cycle,
-      oracle-price: oracle-price,
-      clearing-price: oracle-price,
-      usdcx-cleared: usdcx-clearing,
-      sbtc-cleared: sbtc-clearing,
-      usdcx-unfilled: usdcx-unfilled,
-      sbtc-unfilled: sbtc-unfilled,
-      usdcx-fee: usdcx-fee,
-      sbtc-fee: sbtc-fee,
-      binding-side: (if sbtc-is-binding "sbtc" "usdcx")
-    })
+    (try! (contract-call? .jing-core log-settlement
+            cycle oracle-price oracle-price
+            sbtc-clearing usdcx-clearing
+            sbtc-unfilled usdcx-unfilled
+            sbtc-fee usdcx-fee
+            sbtc-is-binding
+            TOKEN_X TOKEN_Y))
     (ok true))))
 
 (define-private (distribute-to-usdcx-depositor (depositor principal))
@@ -689,6 +702,7 @@
     (total-usdcx (var-get settle-total-usdcx))
     (my-sbtc-received (if (> total-usdcx u0) (/ (* my-deposit (var-get settle-sbtc-after-fee)) total-usdcx) u0))
     (my-usdcx-unfilled (if (> total-usdcx u0) (/ (* my-deposit (- total-usdcx (var-get settle-usdcx-cleared))) total-usdcx) u0))
+    (my-usdcx-cleared (- my-deposit my-usdcx-unfilled))
     (next-cycle (+ cycle u1))
   )
     (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
@@ -709,13 +723,9 @@
       (begin
         (map-delete usdcx-deposit-limits depositor)
         true))
-    (print {
-      event: "distribute-usdcx-depositor",
-      depositor: depositor,
-      cycle: cycle,
-      sbtc-received: my-sbtc-received,
-      usdcx-rolled: my-usdcx-unfilled
-    })
+    (try! (contract-call? .jing-core log-distribute-y-depositor
+            depositor cycle my-sbtc-received my-usdcx-cleared my-usdcx-unfilled
+            TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-private (distribute-to-sbtc-depositor (depositor principal))
@@ -725,6 +735,7 @@
     (total-sbtc (var-get settle-total-sbtc))
     (my-usdcx-received (if (> total-sbtc u0) (/ (* my-deposit (var-get settle-usdcx-after-fee)) total-sbtc) u0))
     (my-sbtc-unfilled (if (> total-sbtc u0) (/ (* my-deposit (- total-sbtc (var-get settle-sbtc-cleared))) total-sbtc) u0))
+    (my-sbtc-cleared (- my-deposit my-sbtc-unfilled))
     (next-cycle (+ cycle u1))
   )
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
@@ -745,13 +756,9 @@
       (begin
         (map-delete sbtc-deposit-limits depositor)
         true))
-    (print {
-      event: "distribute-sbtc-depositor",
-      depositor: depositor,
-      cycle: cycle,
-      usdcx-received: my-usdcx-received,
-      sbtc-rolled: my-sbtc-unfilled
-    })
+    (try! (contract-call? .jing-core log-distribute-x-depositor
+            depositor cycle my-usdcx-received my-sbtc-cleared my-sbtc-unfilled
+            TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-private (roll-and-sweep-dust)
@@ -782,15 +789,11 @@
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
           transfer sbtc-dust current-contract (var-get treasury) none))))
       true)
-    (print { event: "sweep-dust",
-             usdcx-unfilled: acc-usdcx-rol,
-             sbtc-unfilled: acc-sbtc-rol,
-             usdcx-dust: usdcx-dust,
-             usdcx-payout-dust: usdcx-payout-dust,
-             usdcx-roll-dust: usdcx-roll-dust,
-             sbtc-dust: sbtc-dust,
-             sbtc-payout-dust: sbtc-payout-dust,
-             sbtc-roll-dust: sbtc-roll-dust })
+    (try! (contract-call? .jing-core log-sweep-dust
+            acc-sbtc-rol acc-usdcx-rol
+            sbtc-dust sbtc-payout-dust sbtc-roll-dust
+            usdcx-dust usdcx-payout-dust usdcx-roll-dust
+            TOKEN_X TOKEN_Y))
     (ok true)))
 
 (define-read-only (get-dex-price (stx-price uint))

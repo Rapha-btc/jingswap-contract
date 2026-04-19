@@ -104,7 +104,7 @@
     (asserts! (is-eq tx-sender OWNER) ERR_NOT_OWNER)
     (asserts! (> amount u0) ERR_NO_FUNDS)
     (try! (stx-transfer? amount tx-sender current-contract))
-    (try! (contract-call? .jing-vault-registry log-deposit "stx" amount))
+    (try! (contract-call? .jing-core log-deposit "stx" amount))
     (ok true)))
 
 (define-public (deposit-sbtc (amount uint))
@@ -113,7 +113,7 @@
     (asserts! (> amount u0) ERR_NO_FUNDS)
     (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
       transfer amount tx-sender current-contract none))
-    (try! (contract-call? .jing-vault-registry log-deposit "sbtc" amount))
+    (try! (contract-call? .jing-core log-deposit "sbtc" amount))
     (ok true)))
 
 (define-public (withdraw-stx (amount uint))
@@ -122,7 +122,7 @@
     (asserts! (> amount u0) ERR_NO_FUNDS)
     (try! (as-contract? ((with-stx amount))
       (try! (stx-transfer? amount current-contract OWNER))))
-    (try! (contract-call? .jing-vault-registry log-withdraw "stx" amount))
+    (try! (contract-call? .jing-core log-withdraw "stx" amount))
     (ok true)))
 
 (define-public (withdraw-sbtc (amount uint))
@@ -132,7 +132,7 @@
     (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
       (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
         transfer amount current-contract OWNER none))))
-    (try! (contract-call? .jing-vault-registry log-withdraw "sbtc" amount))
+    (try! (contract-call? .jing-core log-withdraw "sbtc" amount))
     (ok true)))
 
 ;; Cancel a signed intent. Callable by owner or the whitelisted
@@ -145,7 +145,7 @@
               ERR_NOT_OWNER)
     (asserts! (is-none (map-get? used-pubkey-authorizations target-hash)) ERR_REPLAY)
     (map-set used-pubkey-authorizations target-hash (var-get owner-pubkey))
-    (try! (contract-call? .jing-vault-registry log-revoke target-hash))
+    (try! (contract-call? .jing-core log-revoke target-hash))
     (ok true)))
 
 ;; ---------------------------------------------------------------
@@ -165,7 +165,7 @@
                   (is-eq (some tx-sender) (var-get keeper)))
               ERR_NOT_OWNER)
     (try! (as-contract (contract-call? .blind-premium cancel-stx-deposit)))
-    (try! (contract-call? .jing-vault-registry log-cancel "stx"))
+    (try! (contract-call? .jing-core log-cancel "stx"))
     (ok true)))
 
 (define-public (cancel-jing-sbtc)
@@ -174,7 +174,7 @@
                   (is-eq (some tx-sender) (var-get keeper)))
               ERR_NOT_OWNER)
     (try! (as-contract (contract-call? .blind-premium cancel-sbtc-deposit)))
-    (try! (contract-call? .jing-vault-registry log-cancel "sbtc"))
+    (try! (contract-call? .jing-core log-cancel "sbtc"))
     (ok true)))
 
 ;; ---------------------------------------------------------------
@@ -208,7 +208,7 @@
         (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" amount))
           (try! (contract-call? .blind-premium deposit-sbtc amount limit-price))))
         (asserts! false ERR_INVALID_SIDE)))
-    (try! (contract-call? .jing-vault-registry log-jing-deposit
+    (try! (contract-call? .jing-core log-jing-deposit
       msg-hash side amount limit-price))
     (ok msg-hash)))
 
@@ -257,7 +257,7 @@
             'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2
             amount min-out))))
         (asserts! false ERR_INVALID_SIDE)))
-    (try! (contract-call? .jing-vault-registry log-bitflow-swap
+    (try! (contract-call? .jing-core log-bitflow-swap
       msg-hash side amount limit-price min-out))
     (ok msg-hash)))
 
