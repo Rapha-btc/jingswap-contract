@@ -48,7 +48,7 @@
 (define-constant ERR-DEADLINE-NOT-REACHED (err u108))
 (define-constant ERR-NOTHING-TO-ATTRIBUTE (err u109))
 
-(define-data-var interest-bps uint u1250)        ;; default 12.5% flat
+(define-data-var interest-bps uint u100)        ;; default 12.5% flat
 (define-data-var min-sbtc-borrow uint u1000000) ;; 0.01 sBTC
 (define-data-var available-sbtc uint u0)        ;; funded sBTC, not yet borrowed
 (define-data-var next-loan-id uint u1)
@@ -80,7 +80,7 @@
                 (/ (* (get sbtc-principal loan) (get interest-bps loan)) BPS_PRECISION)))
     ERR-LOAN-NOT-FOUND))
 
-(define-read-only (our-sbtc-in-jing (cycle uint))
+(define-private (our-sbtc-in-jing (cycle uint))
   (contract-call? JING-MARKET get-sbtc-deposit cycle current-contract))
 
 ;; ---------- Admin ----------
@@ -110,14 +110,13 @@
 
 (define-public (withdraw-funds (amount uint))
   (let ((caller tx-sender)
-        (liquid (var-get available-sbtc))
-        (new-liquid (- liquid amount)))
+        (liquid (var-get available-sbtc)))
     (asserts! (is-eq caller LENDER) ERR-NOT-LENDER)
     (asserts! (<= amount liquid) ERR-INSUFFICIENT-FUNDS)
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? SBTC transfer amount current-contract caller none))))
-    (var-set available-sbtc new-liquid)
-    (print { event: "withdraw-funds", amount: amount, available-sbtc: new-liquid })
+    (var-set available-sbtc (- liquid amount))
+    (print { event: "withdraw-funds", amount: amount, available-sbtc: (- liquid amount) })
     (ok true)))
 
 ;; ---------- Loan lifecycle ----------
