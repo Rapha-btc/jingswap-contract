@@ -1,17 +1,18 @@
 ;; jing-loan-sbtc-for-stx
 ;;
-;; Lender funds sBTC. A whitelisted borrower takes a loan in two steps:
-;;   1. `borrow`  — locks sBTC in the contract, creates the loan record.
-;;   2. `swap`    — deposits that sBTC into Jing v2 (sbtc-stx-0-jing-v2) during
-;;                  a deposit phase. Starts the clawback deadline.
+;; Lender funds sBTC. A whitelisted borrower takes a loan in three steps:
+;;   1. `borrow`                 - locks sBTC, creates the loan record.
+;;   2. `swap`                   - deposits sBTC into Jing v2 (sbtc-stx-0-jing-v2)
+;;                                 during a deposit phase. Starts clawback deadline.
+;;   3. `record-stx-collateral`  - after Jing settles, snapshots STX received and
+;;                                 writes it into the loan record.
 ;;
-;; Splitting borrow and swap keeps each tx cheap (no atomic close+settle with
-;; Pyth VAAs) and lets the borrower time the swap to a live Jing deposit phase.
+;; Splitting the flow keeps each tx cheap (no atomic close+settle with Pyth VAAs)
+;; and lets the borrower time the swap to a live Jing deposit phase. Recording
+;; collateral separately makes the loan record fully auditable before repay/seize.
 ;;
-;; After Jing settles, STX lands in this contract. At `repay` or `seize` the
-;; STX collateral is attributed inline from (contract-balance - assigned-stx)
-;; and transferred to borrower (on repay) or lender (on seize).
-;; Only ONE swapped-but-unsettled loan at a time, to keep attribution clean.
+;; Only ONE loan in STATUS-SWAPPED at a time, so the contract STX balance is
+;; always fully attributable to the single active loan.
 
 (define-constant SBTC 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 (define-constant JING-MARKET 'SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2)
@@ -40,12 +41,13 @@
 (define-constant ERR-DEADLINE-NOT-REACHED (err u110))
 (define-constant ERR-ALREADY-PROPOSED (err u111))
 (define-constant ERR-NO-PROPOSAL (err u112))
-(define-constant ERR-COOLDOWN-PASSED (err u113))
 (define-constant ERR-NOTHING-TO-ATTRIBUTE (err u114))
+(define-constant ERR-COOLDOWN-NOT-PASSED (err u115))
+(define-constant ERR-ALREADY-ACTIVE (err u116))
 
 (define-data-var lender principal tx-sender)
 (define-data-var operator principal tx-sender)
-(define-data-var interest-bps uint u1250)          ;; default 2%
+(define-data-var interest-bps uint u1250)          ;; default 12.5%
 (define-data-var available-sbtc uint u0)          ;; ready for new borrows
 (define-data-var next-loan-id uint u1)
 (define-data-var swapped-loan (optional uint) none) ;; at most one STATUS-SWAPPED loan
@@ -59,6 +61,7 @@
   interest-bps: uint,
   jing-cycle: uint,        ;; set at swap
   deadline: uint,          ;; set at swap
+  stx-collateral: uint,    ;; set at record-stx-collateral, after Jing settles
   status: uint
 })
 
@@ -72,11 +75,7 @@
 (define-read-only (get-loan (loan-id uint)) (map-get? loans loan-id))
 
 (define-read-only (is-whitelisted (who principal))
-  (if (default-to false (map-get? whitelist-active who))
-      true
-      (match (map-get? whitelist-proposed who)
-        proposed-block (>= burn-block-height (+ proposed-block WHITELIST-COOLDOWN))
-        false)))
+  (default-to false (map-get? whitelist-active who)))
 
 (define-read-only (owed-on-loan (loan-id uint))
   (match (map-get? loans loan-id)
@@ -85,12 +84,6 @@
     ERR-LOAN-NOT-FOUND))
 
 ;; ---------- Admin ----------
-
-(define-public (set-lender (new-lender principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
-    (var-set lender new-lender)
-    (ok true)))
 
 (define-public (set-operator (new-operator principal))
   (begin
@@ -109,47 +102,53 @@
 (define-public (fund (amount uint))
   (let ((caller tx-sender))
     (asserts! (is-eq caller (var-get lender)) ERR-NOT-LENDER)
-    (try! (contract-call? SBTC transfer amount caller (as-contract tx-sender) none))
+    (try! (contract-call? SBTC transfer amount caller current-contract none))
     (var-set available-sbtc (+ (var-get available-sbtc) amount))
-    (print { event: "fund", amount: amount })
+    (print { event: "fund", amount: amount, available-sbtc: available-sbtc })
     (ok true)))
 
 (define-public (withdraw-funds (amount uint))
-  (let ((caller tx-sender))
+  (let ((caller tx-sender)
+        (liquid (var-get available-sbtc)))
     (asserts! (is-eq caller (var-get lender)) ERR-NOT-LENDER)
-    (asserts! (<= amount (var-get available-sbtc)) ERR-INSUFFICIENT-FUNDS)
-    (try! (as-contract (contract-call? SBTC transfer amount tx-sender caller none)))
-    (var-set available-sbtc (- (var-get available-sbtc) amount))
-    (print { event: "withdraw-funds", amount: amount })
+    (asserts! (<= amount liquid) ERR-INSUFFICIENT-FUNDS)
+    (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
+      (try! (contract-call? SBTC transfer amount current-contract caller none))))
+    (var-set available-sbtc (- liquid amount))
+    (print { event: "withdraw-funds", amount: amount, available-sbtc: liquid })
     (ok true)))
 
 ;; ---------- Whitelist ----------
 
 (define-public (propose-whitelist (borrower principal))
   (begin
-    (asserts! (is-eq tx-sender (var-get operator)) ERR-NOT-OPERATOR)
+    (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (asserts! (is-none (map-get? whitelist-proposed borrower)) ERR-ALREADY-PROPOSED)
-    (asserts! (not (default-to false (map-get? whitelist-active borrower))) ERR-ALREADY-PROPOSED)
+    (asserts! (not (default-to false (map-get? whitelist-active borrower))) ERR-ALREADY-ACTIVE)
     (map-set whitelist-proposed borrower burn-block-height)
     (print { event: "propose-whitelist", borrower: borrower, at: burn-block-height })
     (ok true)))
 
-(define-public (veto-whitelist (borrower principal))
-  (let ((proposed (unwrap! (map-get? whitelist-proposed borrower) ERR-NO-PROPOSAL))
-        (caller tx-sender))
-    (asserts! (or (is-eq caller (var-get lender))
-                  (is-eq caller (var-get operator))) ERR-NOT-OPERATOR)
-    (asserts! (< burn-block-height (+ proposed WHITELIST-COOLDOWN)) ERR-COOLDOWN-PASSED)
-    (map-delete whitelist-proposed borrower)
-    (print { event: "veto-whitelist", borrower: borrower })
-    (ok true)))
-
-(define-public (finalize-whitelist (borrower principal))
+;; Step 2 of whitelisting: after cooldown, operator confirms to activate.
+(define-public (confirm-whitelist (borrower principal))
   (let ((proposed (unwrap! (map-get? whitelist-proposed borrower) ERR-NO-PROPOSAL)))
-    (asserts! (>= burn-block-height (+ proposed WHITELIST-COOLDOWN)) ERR-COOLDOWN-PASSED)
+    (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
+    (asserts! (>= burn-block-height (+ proposed WHITELIST-COOLDOWN)) ERR-COOLDOWN-NOT-PASSED)
     (map-delete whitelist-proposed borrower)
     (map-set whitelist-active borrower true)
-    (print { event: "finalize-whitelist", borrower: borrower })
+    (print { event: "confirm-whitelist", borrower: borrower })
+    (ok true)))
+
+;; Blacklist: lender removes a borrower from the whitelist at any point
+;; (pre- or post-confirmation). E.g., after a default. Clears both maps.
+(define-public (blacklist-borrower (who principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
+    (asserts! (or (default-to false (map-get? whitelist-active who))
+                  (is-some (map-get? whitelist-proposed who))) ERR-NOT-WHITELISTED)
+    (map-delete whitelist-active who)
+    (map-delete whitelist-proposed who)
+    (print { event: "blacklist-borrower", who: who })
     (ok true)))
 
 ;; ---------- Loan lifecycle ----------
@@ -168,6 +167,7 @@
       interest-bps: (var-get interest-bps),
       jing-cycle: u0,
       deadline: u0,
+      stx-collateral: u0,
       status: STATUS-PRE-SWAP
     })
     (var-set next-loan-id (+ loan-id u1))
@@ -195,6 +195,19 @@
              limit: limit-price, cycle: jing-cycle, deadline: deadline })
     (ok true)))
 
+;; Step 3: after Jing settles, record the STX collateral on the loan. Anyone can call.
+(define-public (record-stx-collateral (loan-id uint))
+  (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
+        (now-cycle (contract-call? JING-MARKET get-current-cycle)))
+    (asserts! (is-eq (get status loan) STATUS-SWAPPED) ERR-BAD-STATUS)
+    (asserts! (is-eq (get stx-collateral loan) u0) ERR-BAD-STATUS)
+    (asserts! (> now-cycle (get jing-cycle loan)) ERR-NOT-SETTLED)
+    (let ((stx-balance (stx-get-balance current-contract)))
+      (asserts! (> stx-balance u0) ERR-NOTHING-TO-ATTRIBUTE)
+      (map-set loans loan-id (merge loan { stx-collateral: stx-balance }))
+      (print { event: "record-stx-collateral", loan-id: loan-id, stx: stx-balance })
+      (ok stx-balance))))
+
 ;; Cancel a pre-swap loan and return sBTC to available. Borrower only.
 (define-public (cancel (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
@@ -206,43 +219,40 @@
     (print { event: "cancel", loan-id: loan-id })
     (ok true)))
 
-;; Repay principal + interest in sBTC to lender; release STX to borrower.
-;; STX attribution is inline: contract balance minus already-assigned STX.
+;; Repay principal + interest in sBTC to lender; release recorded STX to borrower.
+;; Requires `record-stx-collateral` to have been called first.
 (define-public (repay (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
         (caller tx-sender))
     (asserts! (is-eq caller (get borrower loan)) ERR-NOT-BORROWER)
     (asserts! (is-eq (get status loan) STATUS-SWAPPED) ERR-BAD-STATUS)
-    (let ((now-cycle (contract-call? JING-MARKET get-current-cycle)))
-      (asserts! (> now-cycle (get jing-cycle loan)) ERR-NOT-SETTLED))
-    (let ((available-stx (stx-get-balance (as-contract tx-sender))))
-      (asserts! (> available-stx u0) ERR-NOTHING-TO-ATTRIBUTE)
-      (let ((owed (+ (get sbtc-principal loan)
-                     (/ (* (get sbtc-principal loan) (get interest-bps loan)) BPS_PRECISION)))
-            (borrower (get borrower loan))
-            (lender-principal (var-get lender)))
-        (try! (contract-call? SBTC transfer owed caller lender-principal none))
-        (try! (as-contract (stx-transfer? available-stx tx-sender borrower)))
-        (map-set loans loan-id (merge loan { status: STATUS-REPAID }))
-        (var-set swapped-loan none)
-        (print { event: "repay", loan-id: loan-id, sbtc-paid: owed,
-                 stx-released: available-stx })
-        (ok true)))))
+    (asserts! (> (get stx-collateral loan) u0) ERR-NOTHING-TO-ATTRIBUTE)
+    (let ((owed (+ (get sbtc-principal loan)
+                   (/ (* (get sbtc-principal loan) (get interest-bps loan)) BPS_PRECISION)))
+          (stx-out (get stx-collateral loan))
+          (borrower (get borrower loan))
+          (lender-principal (var-get lender)))
+      (try! (contract-call? SBTC transfer owed caller lender-principal none))
+      (try! (as-contract (stx-transfer? stx-out tx-sender borrower)))
+      (map-set loans loan-id (merge loan { status: STATUS-REPAID }))
+      (var-set swapped-loan none)
+      (print { event: "repay", loan-id: loan-id, sbtc-paid: owed,
+               stx-released: stx-out })
+      (ok true))))
 
-;; After deadline, lender takes the STX collateral.
+;; After deadline, lender takes the recorded STX collateral.
+;; Requires `record-stx-collateral` to have been called first.
 (define-public (seize (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
         (caller tx-sender))
     (asserts! (is-eq caller (var-get lender)) ERR-NOT-LENDER)
     (asserts! (is-eq (get status loan) STATUS-SWAPPED) ERR-BAD-STATUS)
     (asserts! (>= burn-block-height (get deadline loan)) ERR-DEADLINE-NOT-REACHED)
-    (let ((now-cycle (contract-call? JING-MARKET get-current-cycle)))
-      (asserts! (> now-cycle (get jing-cycle loan)) ERR-NOT-SETTLED))
-    (let ((available-stx (stx-get-balance (as-contract tx-sender))))
-      (asserts! (> available-stx u0) ERR-NOTHING-TO-ATTRIBUTE)
-      (let ((lender-principal (var-get lender)))
-        (try! (as-contract (stx-transfer? available-stx tx-sender lender-principal)))
-        (map-set loans loan-id (merge loan { status: STATUS-SEIZED }))
-        (var-set swapped-loan none)
-        (print { event: "seize", loan-id: loan-id, stx-seized: available-stx })
-        (ok true)))))
+    (asserts! (> (get stx-collateral loan) u0) ERR-NOTHING-TO-ATTRIBUTE)
+    (let ((stx-out (get stx-collateral loan))
+          (lender-principal (var-get lender)))
+      (try! (as-contract (stx-transfer? stx-out tx-sender lender-principal)))
+      (map-set loans loan-id (merge loan { status: STATUS-SEIZED }))
+      (var-set swapped-loan none)
+      (print { event: "seize", loan-id: loan-id, stx-seized: stx-out })
+      (ok true))))
