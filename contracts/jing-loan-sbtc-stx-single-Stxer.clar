@@ -29,7 +29,7 @@
 ;; Immutable lender. REPLACE BEFORE DEPLOYMENT.
 (define-constant LENDER 'SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M)
 
-(define-constant CLAWBACK-DELAY u4200)          ;; ~2 PoX cycles after borrow
+(define-constant CLAWBACK-DELAY u0)          ;; ~2 PoX cycles after borrow
 (define-constant BPS_PRECISION u10000)
 
 (define-constant STATUS-PRE-SWAP u0)
