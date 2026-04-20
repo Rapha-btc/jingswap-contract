@@ -103,6 +103,11 @@ path = "contracts/jing-loan-sbtc-for-stx.clar"
 clarity_version = 4
 epoch = "latest"
 
+[contracts.jing-loan-sbtc-stx-single]
+path = "contracts/jing-loan-sbtc-stx-single.clar"
+clarity_version = 4
+epoch = "latest"
+
 # [contracts.jing-vault-v1]
 # path = "contracts/jing-vault-v1.clar"
 # clarity_version = 4
