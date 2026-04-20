@@ -29,7 +29,7 @@ User signs SIP-018 intent:                jing-vault (1 per user)
 Keeper holds signed intent                  - deposits into / cancels from Jing
   watches oracle off-chain                  - only owner can withdraw
   submits when conditions met
-                                          jing-vault-registry (singleton)
+                                          jing-core (singleton)
                                             - maps user -> vault principal
                                             - stores approved vault code hashes
                                             - keeper reads to find active vaults
@@ -144,7 +144,7 @@ To invalidate an outstanding signed intent without executing it, the user calls 
 |----------|------------|---------|
 | `jing-vault-v1` | Each user | Personal vault holding funds + executing signed intents into Jing |
 | `jing-vault-auth` | Protocol | SIP-018 hash builders for vault message types |
-| `jing-vault-registry` | Protocol | Approved code hashes + user-to-vault mapping |
+| `jing-core` | Protocol | Approved code hashes + user-to-vault mapping |
 
 ## Block Timing Reference (Nakamoto)
 
