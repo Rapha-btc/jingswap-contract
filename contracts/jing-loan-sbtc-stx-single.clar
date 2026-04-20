@@ -170,14 +170,18 @@
 ;; Escape hatch: cancel Jing deposit. sBTC returns to the contract.
 ;; Loan state is unchanged (still SWAP-DEPOSITED); the recovered sBTC sits in
 ;; the contract and offsets the borrower's out-of-pocket at repay.
+;; Callable by borrower anytime; also by lender after the deadline to unblock seize.
 (define-public (cancel-swap (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
         (caller tx-sender))
-    (asserts! (is-eq caller BORROWER) ERR-NOT-BORROWER)
     (asserts! (is-eq (get status loan) SWAP-DEPOSITED) ERR-BAD-STATUS)
+    (asserts! (or (is-eq caller BORROWER)
+                  (and (is-eq caller LENDER)
+                       (>= burn-block-height (get deadline loan))))
+              ERR-NOT-BORROWER)
     (try! (as-contract? ((with-all-assets-unsafe))
       (try! (contract-call? JING-MARKET cancel-sbtc-deposit))))
-    (print { event: "cancel-swap", loan-id: loan-id })
+    (print { event: "cancel-swap", loan-id: loan-id, caller: caller })
     (ok true)))
 
 (define-public (set-swap-limit (loan-id uint) (limit-price uint))
