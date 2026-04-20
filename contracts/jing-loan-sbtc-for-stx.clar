@@ -17,7 +17,6 @@
 (define-constant SBTC 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 (define-constant JING-MARKET 'SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2)
 
-(define-constant MIN-SBTC-BORROW u1000000)         ;; 0.01 sBTC (sats)
 (define-constant CLAWBACK-DELAY u4200)             ;; ~2 PoX cycles of burn blocks after swap
 (define-constant WHITELIST-COOLDOWN u1)            ;; burn blocks before whitelist takes effect
 (define-constant BPS_PRECISION u10000)
@@ -51,6 +50,7 @@
 (define-data-var available-sbtc uint u0)          ;; ready for new borrows
 (define-data-var next-loan-id uint u1)
 (define-data-var swapped-loan (optional uint) none) ;; at most one STATUS-SWAPPED loan
+(define-data-var min-sbtc-borrow uint u1000000) ;; 0.01 sBTC (sats)
 
 (define-map whitelist-active principal bool)
 (define-map whitelist-proposed principal uint)
@@ -156,11 +156,12 @@
 ;; Step 1: create loan, lock sBTC. No Jing interaction.
 (define-public (borrow (amount uint))
   (let ((caller tx-sender)
-        (loan-id (var-get next-loan-id)))
+        (loan-id (var-get next-loan-id))
+        (liquid (var-get available-sbtc)))
     (asserts! (is-whitelisted caller) ERR-NOT-WHITELISTED)
-    (asserts! (>= amount MIN-SBTC-BORROW) ERR-AMOUNT-TOO-LOW)
-    (asserts! (<= amount (var-get available-sbtc)) ERR-INSUFFICIENT-FUNDS)
-    (var-set available-sbtc (- (var-get available-sbtc) amount))
+    (asserts! (>= amount (var-get min-sbtc-borrow)) ERR-AMOUNT-TOO-LOW)
+    (asserts! (<= amount liquid) ERR-INSUFFICIENT-FUNDS)
+    (var-set available-sbtc (- liquid amount))
     (map-set loans loan-id {
       borrower: caller,
       sbtc-principal: amount,
