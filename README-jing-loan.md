@@ -150,6 +150,8 @@ At any point (pre- or post-confirmation), the **lender** can call `blacklist-bor
 |---|---|---|
 | `set-operator(new)` | operator | Transfer operator role |
 | `set-interest-bps(bps)` | lender | Update default rate (locks per-loan at borrow time) |
+| `set-min-sbtc-borrow(amount)` | lender | Update minimum borrow amount |
+| `set-borrower-limit(who, amount)` | lender | Set/raise/lower a borrower's credit limit |
 
 **Lender is immutable.** Rotating the lender would let a new principal withdraw funds and seize STX on loans they didn't originate, breaking the bilateral trust model. To rotate: withdraw all sBTC, wait for active loans to close, redeploy with new lender.
 
@@ -177,7 +179,30 @@ At any point (pre- or post-confirmation), the **lender** can call `blacklist-bor
 | `seize(loan-id)` | lender | Take STX after deadline |
 
 ### Read-only
-`get-lender`, `get-operator`, `get-interest-bps`, `get-available-sbtc`, `get-swapped-loan`, `get-loan(id)`, `is-whitelisted(who)`, `owed-on-loan(id)`
+`get-lender`, `get-operator`, `get-interest-bps`, `get-available-sbtc`, `get-swapped-loan`, `get-loan(id)`, `is-whitelisted(who)`, `owed-on-loan(id)`, `get-borrower-limit(who)`, `get-borrower-debt(who)`, `get-borrower-available(who)`
+
+---
+
+## Credit limits
+
+Each borrower has a **credit limit** set by the lender (`set-borrower-limit(who, amount)`). Cumulative unresolved debt cannot exceed it.
+
+**The limit is global per-borrower — not cycle-scoped.** Jing cycles, PoX cycles, calendar time — none of it affects the limit. Once you hit it, you can't borrow more until you resolve enough open loans (repay / cancel / seize) to free up headroom. Same way a credit card works: Visa doesn't reset your limit every month, you just can't exceed it.
+
+**How it works:**
+- Borrower starts with limit `0` (no borrows possible until lender sets one)
+- `borrow(amount)` adds `amount` to `borrower-debt[caller]` and fails with `ERR-OVER-LIMIT` if the new total would exceed the limit
+- `cancel` / `repay` / `seize` subtract the loan's principal from `borrower-debt`
+- Lender can **raise** the limit (extend credit) or **lower** it (throttle exposure) at any time. Lowering doesn't affect existing loans — just prevents new borrows beyond the new cap.
+
+**Worked example:** limit = 1 sBTC
+- Borrow 0.4 sBTC → debt = 0.4, available = 0.6
+- Borrow another 0.3 sBTC → debt = 0.7, available = 0.3
+- Borrow another 0.4 sBTC → **fails** (0.7 + 0.4 > 1.0)
+- Repay the 0.4 sBTC loan → debt = 0.3, available = 0.7
+- Now they can borrow up to 0.7 more
+
+Query `get-borrower-available(who)` for remaining headroom.
 
 ---
 
