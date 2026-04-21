@@ -1,0 +1,243 @@
+id: 0
+name: Devnet deployment
+network: devnet
+stacks-node: http://localhost:20443
+bitcoin-node: http://devnet:devnet@localhost:18443
+plan:
+  batches:
+  - id: 0
+    transactions:
+    - transaction-type: requirement-publish
+      contract-id: SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE.sip-010-trait-ft-standard
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 8400
+      path: ./.cache/requirements/SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE.sip-010-trait-ft-standard.clar
+      clarity-version: 1
+    epoch: '2.0'
+  - id: 1
+    transactions:
+    - transaction-type: requirement-publish
+      contract-id: SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.sip-010-trait-ft-standard-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 4740
+      path: ./.cache/requirements/SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.sip-010-trait-ft-standard-v-1-1.clar
+      clarity-version: 2
+    - transaction-type: requirement-publish
+      contract-id: SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-trait-v-1-2
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 18630
+      path: ./.cache/requirements/SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-trait-v-1-2.clar
+      clarity-version: 2
+    epoch: '2.5'
+  - id: 2
+    transactions:
+    - transaction-type: requirement-publish
+      contract-id: SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-registry
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 112090
+      path: ./.cache/requirements/SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-registry.clar
+      clarity-version: 3
+    - transaction-type: requirement-publish
+      contract-id: SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 47590
+      path: ./.cache/requirements/SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token.clar
+      clarity-version: 3
+    - transaction-type: requirement-publish
+      contract-id: SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-deposit
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 41510
+      path: ./.cache/requirements/SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-deposit.clar
+      clarity-version: 3
+    epoch: '3.0'
+  - id: 3
+    transactions:
+    - transaction-type: requirement-publish
+      contract-id: SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 98660
+      path: ./.cache/requirements/SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1.clar
+      clarity-version: 2
+    epoch: '3.1'
+  - id: 4
+    transactions:
+    - transaction-type: requirement-publish
+      contract-id: SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 5060
+      path: ./.cache/requirements/SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.clar
+      clarity-version: 3
+    - transaction-type: requirement-publish
+      contract-id: SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 18800
+      path: ./.cache/requirements/SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.clar
+      clarity-version: 3
+    - transaction-type: requirement-publish
+      contract-id: SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-governance-v3
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 237100
+      path: ./.cache/requirements/SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-governance-v3.clar
+      clarity-version: 3
+    - transaction-type: requirement-publish
+      contract-id: SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 33910
+      path: ./.cache/requirements/SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4.clar
+      clarity-version: 3
+    - transaction-type: requirement-publish
+      contract-id: SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 43230
+      path: ./.cache/requirements/SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4.clar
+      clarity-version: 3
+    epoch: '3.2'
+  - id: 5
+    transactions:
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.sip-010-trait-ft-standard-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 4570
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.sip-010-trait-ft-standard-v-1-1.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-trait-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 42580
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-trait-v-1-1.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-core-trait-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 11860
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-core-trait-v-1-1.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.sip-013-trait-sft-standard-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 5430
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.sip-013-trait-sft-standard-v-1-1.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.sip-013-transfer-many-trait-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 3580
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.sip-013-transfer-many-trait-v-1-1.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 231920
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 231920
+      path: ./.cache/requirements/SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 843960
+      path: ./.cache/requirements/SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 353550
+      path: ./.cache/requirements/SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2.clar
+      clarity-version: 4
+    - transaction-type: requirement-publish
+      contract-id: SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
+      remap-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      remap-principals:
+        SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 79150
+      path: ./.cache/requirements/SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx.clar
+      clarity-version: 3
+    - transaction-type: contract-publish
+      contract-name: blind-auction
+      expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 375520
+      path: contracts/blind-auction.clar
+      anchor-block-only: true
+      clarity-version: 4
+    - transaction-type: contract-publish
+      contract-name: blind-auction-stxer
+      expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 369220
+      path: contracts/blind-auction-stxer.clar
+      anchor-block-only: true
+      clarity-version: 4
+    - transaction-type: contract-publish
+      contract-name: jing-loan-sbtc-stx-single
+      expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 130700
+      path: contracts/jing-loan-sbtc-stx-single.clar
+      anchor-block-only: true
+      clarity-version: 4
+    - transaction-type: contract-publish
+      contract-name: sbtc-stx-0-v2
+      expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 356590
+      path: contracts/v2/sbtc-stx-0-v2.clar
+      anchor-block-only: true
+      clarity-version: 4
+    - transaction-type: contract-publish
+      contract-name: sbtc-stx-20-v2
+      expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 357900
+      path: contracts/v2/sbtc-stx-20-v2.clar
+      anchor-block-only: true
+      clarity-version: 4
+    - transaction-type: contract-publish
+      contract-name: sbtc-usdcx-v2
+      expected-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      cost: 379750
+      path: contracts/v2/sbtc-usdcx-v2.clar
+      anchor-block-only: true
+      clarity-version: 4
+    epoch: '3.3'

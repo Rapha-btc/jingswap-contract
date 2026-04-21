@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeAll } from "vitest";
 import { Cl, cvToJSON } from "@stacks/transactions";
 
 const xykPool = cvToJSON(
@@ -277,6 +277,113 @@ describe.skipIf(!remoteDataEnabled)("jing-loan-sbtc-stx-single", function () {
 
     const loan = cvToJSON(ro(LOAN, "get-loan", [Cl.uint(1)]));
     expect(loan.value.value["status"].value).toBe(String(STATUS_SEIZED));
+    expect(ro(LOAN, "get-active-loan", [])).toBeNone();
+  });
+});
+
+// ============================================================================
+// Full happy path: borrow → swap-deposit → Jing close+settle-with-refresh → repay
+// Mirrors simulations/simul-jing-loan-true-happy-path.js but in Clarinet.
+// ============================================================================
+
+const JING_MARKET_ADDR = "SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22";
+const JING_MARKET_NAME = "sbtc-stx-0-jing-v2";
+const PYTH_DEPLOYER = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y";
+const PYTH_STORAGE = "pyth-storage-v4";
+const PYTH_DECODER = "pyth-pnau-decoder-v3";
+const WORMHOLE_CORE = "wormhole-core-v4";
+
+const BTC_USD_FEED = "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+const STX_USD_FEED = "ec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17";
+
+const DEPOSIT_MIN_BLOCKS = 10;
+const STX_100 = 100_000_000;
+
+async function fetchPythVAA(): Promise<string> {
+  const timestamp = Math.floor(Date.now() / 1000) - 30;
+  const url = `https://hermes.pyth.network/v2/updates/price/${timestamp}?ids[]=${BTC_USD_FEED}&ids[]=${STX_USD_FEED}`;
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  const data = await response.json();
+  if (!data.binary?.data?.[0]) {
+    throw new Error(`No Pyth VAA at timestamp ${timestamp}`);
+  }
+  return data.binary.data[0];
+}
+
+describe.skipIf(!remoteDataEnabled)("jing-loan-sbtc-stx-single > happy path e2e", function () {
+
+  it("fund → borrow → swap → settle → repay releases STX to borrower", async function () {
+    const vaaHex = await fetchPythVAA();
+    console.log(`[happy-path] Got Pyth VAA: ${vaaHex.length} hex chars`);
+    const loanAmount = SBTC_1M;
+    const fundAmount = SBTC_1M;
+    // High limit so our sBTC clears easily (very permissive)
+    const swapLimit = 99_999_999_999_999;
+
+    // 1. Fund
+    setupFunded(fundAmount);
+
+    // 2. Borrow
+    expect(pub(LOAN, "borrow", [Cl.uint(loanAmount)], BORROWER).result).toBeOk(Cl.uint(1));
+
+    // 3. Swap-deposit (loan contract deposits sBTC into Jing)
+    expect(pub(LOAN, "swap-deposit", [Cl.uint(1), Cl.uint(swapLimit)], BORROWER).result).toBeOk(Cl.bool(true));
+
+    // 4. Add an STX-side depositor on Jing so clearing can happen.
+    //    wallet_1 deposits STX at a low limit (willing to sell cheap).
+    const stxDepositResult = simnet.callPublicFn(
+      `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+      "deposit-stx",
+      [Cl.uint(STX_100), Cl.uint(1)], // STX amount, very low sats/STX limit
+      wallet1
+    );
+    expect(stxDepositResult.result).toBeOk(Cl.uint(STX_100));
+
+    // 5. Mine blocks to satisfy DEPOSIT_MIN_BLOCKS
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+
+    // 6. Jing close-and-settle-with-refresh with fetched Pyth VAA
+    const vaaBuf = Cl.bufferFromHex(vaaHex);
+    const settleResult = simnet.callPublicFn(
+      `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+      "close-and-settle-with-refresh",
+      [
+        vaaBuf,
+        vaaBuf,
+        Cl.contractPrincipal(PYTH_DEPLOYER, PYTH_STORAGE),
+        Cl.contractPrincipal(PYTH_DEPLOYER, PYTH_DECODER),
+        Cl.contractPrincipal(PYTH_DEPLOYER, WORMHOLE_CORE),
+      ],
+      wallet1
+    );
+    expect(settleResult.result).toBeOk(Cl.bool(true));
+
+    // 7. Verify loan contract has STX from settlement
+    const contractStx = cvToJSON(
+      simnet.callReadOnlyFn(LOAN, "get-lender", [], deployer).result
+    );
+    const stxBalance = Number(
+      simnet.runSnippet(`(stx-get-balance '${LOAN_ID})`).value
+    );
+    console.log(`[happy-path] Contract STX after settle: ${stxBalance}`);
+    expect(stxBalance).toBeGreaterThan(0);
+
+    // 8. Repay — borrower tops up shortfall, contract pays LENDER, STX to BORROWER
+    const owed = expectedOwed(loanAmount);
+    fundSbtc(BORROWER, owed); // generous topup
+    const borrowerStxBefore = Number(
+      simnet.runSnippet(`(stx-get-balance '${BORROWER})`).value
+    );
+    expect(pub(LOAN, "repay", [Cl.uint(1)], BORROWER).result).toBeOk(Cl.bool(true));
+    const borrowerStxAfter = Number(
+      simnet.runSnippet(`(stx-get-balance '${BORROWER})`).value
+    );
+
+    console.log(`[happy-path] Borrower STX gained: ${borrowerStxAfter - borrowerStxBefore}`);
+    expect(borrowerStxAfter - borrowerStxBefore).toBeGreaterThan(0);
+
+    const loan = cvToJSON(ro(LOAN, "get-loan", [Cl.uint(1)]));
+    expect(loan.value.value["status"].value).toBe(String(STATUS_REPAID));
     expect(ro(LOAN, "get-active-loan", [])).toBeNone();
   });
 });
