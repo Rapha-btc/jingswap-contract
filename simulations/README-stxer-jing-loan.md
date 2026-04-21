@@ -479,6 +479,58 @@ SBTC_WHALE → LENDER                              (1 sBTC seed)
   and `(some u1)`), proving assertion failures revert cleanly without
   corrupting state.
 
+## Simulation 7: Error cases bundle (`simul-jing-loan-errors.js`)
+
+Single simulation that fires every reachable assertion guard in sequence and
+confirms each one errors with the expected code while leaving state intact.
+
+```bash
+npx tsx simulations/simul-jing-loan-errors.js
+```
+
+https://stxer.xyz/simulations/mainnet/5d26202b393b788c7832561bc3870777
+
+### Guards exercised
+
+| Step | Call | Sender | Expected | Why it errors |
+|------|------|--------|----------|---------------|
+| 4 | `fund(1M)` | BORROWER | `err u100` | ERR-NOT-LENDER — fund is lender-only |
+| 5 | `borrow(500k)` | BORROWER | `err u102` | ERR-AMOUNT-TOO-LOW — below min-sbtc-borrow u1000000 |
+| 6 | `borrow(20M)` | LENDER | `err u101` | ERR-NOT-BORROWER — borrow is borrower-only |
+| 7 | `borrow(20M)` | BORROWER | `(ok u1)` | valid — creates active loan |
+| 9 | `borrow(10M)` | BORROWER | `err u104` | ERR-ACTIVE-LOAN-EXISTS — one-loan invariant |
+| 10 | `repay(999)` | BORROWER | `err u105` | ERR-LOAN-NOT-FOUND |
+| 11 | `repay(1)` (PRE-SWAP) | BORROWER | `err u106` | ERR-BAD-STATUS — repay needs SWAP-DEPOSITED |
+| 12 | `cancel-swap(1)` (PRE-SWAP) | BORROWER | `err u106` | ERR-BAD-STATUS — cancel-swap needs SWAP-DEPOSITED |
+| 13 | `set-interest-bps(500)` | BORROWER | `err u100` | ERR-NOT-LENDER |
+| 14 | `set-min-sbtc-borrow(2M)` | BORROWER | `err u100` | ERR-NOT-LENDER |
+
+### State unchanged by failed calls
+
+After the full sequence of errors:
+
+| Read | Result |
+|------|--------|
+| `(get-loan u1)` | status `u0`, principal 20M, interest-bps `u100` — intact |
+| `(get-active-loan)` | `(some u1)` — still the one legitimate loan |
+| `(get-available-sbtc)` | `u30000000` — 50M funded − 20M borrowed |
+| `(get-interest-bps)` | `u100` — unchanged by failed setter |
+| `(get-min-sbtc-borrow)` | `u1000000` — unchanged |
+
+### Guard NOT exercised here
+
+- **`ERR-DEADLINE-NOT-REACHED (u108)` on `seize`** — unreachable in the Stxer
+  clone since `CLAWBACK-DELAY u0` makes the deadline immediately satisfiable.
+  Must be tested against the production contract (with `CLAWBACK-DELAY u4200`)
+  in a Clarinet test.
+
+### Note on `cancel-swap` assertion order
+
+`cancel-swap` checks `(is-eq (get status loan) SWAP-DEPOSITED)` before the
+caller authorization check. So a non-borrower calling on a PRE-SWAP loan will
+err with `u106` (BAD-STATUS), not `u101` (NOT-BORROWER). Order matters for
+fuzzers and downstream callers — don't assume these errors are interchangeable.
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
