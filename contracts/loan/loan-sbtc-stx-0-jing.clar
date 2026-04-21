@@ -1,65 +1,67 @@
-;; jing-loan-sbtc-stx-single
+;; loan-sbtc-stx-0-jing
 ;;
-;; Single-borrower, single-active-loan PoC variant.
-;; Strips the multi-borrower, whitelist-cooldown, credit-limit complexity.
-;; One lender funds the contract; one immutable BORROWER draws loans serially.
-;; Lender cannot rug the borrower: their only lever is `withdraw-funds` on
-;; sBTC that hasn't yet been borrowed.
+;; Per-borrower loan contract specialized for sbtc-stx-0-jing-v2.
+;; Funded just-in-time by a lender reserve contract (loan-reserve.clar).
+;;
+;; Immutable BORROWER and LENDER (= reserve contract). One active loan
+;; at a time. N singles run in parallel, each as its own Jing depositor
+;; principal, with no cross-contamination at Jing's per-principal layer.
 ;;
 ;; Flow:
-;;   1. `borrow`               - locks sBTC, creates loan, starts clawback deadline.
-;;   2. `swap-deposit`         - deposits sBTC into Jing sbtc-stx-0-jing-v2 during
-;;                               a deposit phase.
-;;   3. `repay` or `seize`     - once Jing has fully resolved our deposit
-;;                               (cleared + rolls done). Both use the live STX
-;;                               balance of the contract; `record-stx-collateral`
-;;                               exists as an optional audit snapshot.
+;;   1. `borrow`       - pulls sBTC from the reserve, creates loan,
+;;                       starts clawback deadline.
+;;   2. `swap-deposit` - deposits sBTC into sbtc-stx-0-jing-v2 during
+;;                       a deposit phase.
+;;   3. `repay` or `seize` - once Jing has fully resolved our deposit.
+;;                       Pays sBTC to the reserve and STX to the
+;;                       appropriate party, then calls
+;;                       `reserve.notify-return` to release the
+;;                       principal against the reserve's outstanding.
 ;;
-;; Escape hatch:
-;;   `cancel-swap` - borrower calls Jing's `cancel-sbtc-deposit` to pull back
-;;                   any sBTC still deposited in Jing v2. Loan state is
-;;                   unchanged; the recovered sBTC sits in the contract and
-;;                   offsets the borrower's out-of-pocket at repay.
+;; Escape hatches:
+;;   `cancel`      - pre-swap abandon by borrower. Principal returns
+;;                   to reserve.
+;;   `cancel-swap` - post-swap-deposit pull-back from Jing. Loan
+;;                   stays active; recovered sBTC sits on the
+;;                   contract and is reconciled at repay/seize.
+;;                   Borrower anytime; permissionless after deadline.
 
 (define-constant SBTC 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 (define-constant JING-MARKET 'SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2)
-;; Immutable borrower. Lender can never rug: worst they can do is withdraw
-;; unborrowed sBTC from `available-sbtc`. REPLACE BEFORE DEPLOYMENT.
+;; Immutable borrower. REPLACE BEFORE DEPLOYMENT.
 (define-constant BORROWER 'SP3KJBWTS3K562BF5NXWG5JC8W90HEG7WPYH5B97X)
-;; Immutable lender. REPLACE BEFORE DEPLOYMENT.
-(define-constant LENDER 'SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M)
+;; Reserve contract (resolves to same deployer as this single).
+(define-constant LENDER .loan-reserve)
 
-(define-constant CLAWBACK-DELAY u4200)          ;; ~2 PoX cycles after borrow
+(define-constant CLAWBACK-DELAY u4200)
 (define-constant BPS_PRECISION u10000)
+;; Immutable loan terms. REPLACE BEFORE DEPLOYMENT if needed.
+(define-constant INTEREST-BPS u100)           ;; 1% flat
+(define-constant MIN-SBTC-BORROW u1000000)    ;; 0.01 sBTC
 
 (define-constant STATUS-PRE-SWAP u0)
 (define-constant SWAP-DEPOSITED u1)
 (define-constant STATUS-REPAID u2)
 (define-constant STATUS-SEIZED u3)
+(define-constant STATUS-CANCELLED u4)
 
-(define-constant ERR-NOT-LENDER (err u100))
 (define-constant ERR-NOT-BORROWER (err u101))
 (define-constant ERR-AMOUNT-TOO-LOW (err u102))
-(define-constant ERR-INSUFFICIENT-FUNDS (err u103))
 (define-constant ERR-ACTIVE-LOAN-EXISTS (err u104))
 (define-constant ERR-LOAN-NOT-FOUND (err u105))
 (define-constant ERR-BAD-STATUS (err u106))
 (define-constant ERR-NOT-FULLY-RESOLVED (err u107))
 (define-constant ERR-DEADLINE-NOT-REACHED (err u108))
-(define-constant ERR-NOTHING-TO-ATTRIBUTE (err u109))
 
-(define-data-var interest-bps uint u100)        ;; default 12.5% flat
-(define-data-var min-sbtc-borrow uint u1000000) ;; 0.01 sBTC
-(define-data-var available-sbtc uint u0)        ;; funded sBTC, not yet borrowed
 (define-data-var next-loan-id uint u1)
-(define-data-var active-loan (optional uint) none) ;; at most one unresolved loan
+(define-data-var active-loan (optional uint) none)
 
 (define-map loans uint {
-  sbtc-principal: uint,        ;; immutable after borrow
+  sbtc-principal: uint,
   interest-bps: uint,
-  jing-cycle: uint,            ;; set at swap-deposit
-  deadline: uint,              ;; set at borrow
-  stx-collateral: uint,        ;; optional audit snapshot via record-stx-collateral
+  jing-cycle: uint,
+  deadline: uint,
+  stx-collateral: uint,
   limit-price: uint,
   status: uint
 })
@@ -68,9 +70,8 @@
 
 (define-read-only (get-lender) LENDER)
 (define-read-only (get-borrower) BORROWER)
-(define-read-only (get-interest-bps) (var-get interest-bps))
-(define-read-only (get-min-sbtc-borrow) (var-get min-sbtc-borrow))
-(define-read-only (get-available-sbtc) (var-get available-sbtc))
+(define-read-only (get-interest-bps) INTEREST-BPS)
+(define-read-only (get-min-sbtc-borrow) MIN-SBTC-BORROW)
 (define-read-only (get-active-loan) (var-get active-loan))
 (define-read-only (get-loan (loan-id uint)) (map-get? loans loan-id))
 
@@ -83,57 +84,19 @@
 (define-private (our-sbtc-in-jing (cycle uint))
   (contract-call? JING-MARKET get-sbtc-deposit cycle current-contract))
 
-;; ---------- Admin ----------
-
-(define-public (set-interest-bps (bps uint))
-  (begin
-    (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (var-set interest-bps bps)
-    (ok true)))
-
-(define-public (set-min-sbtc-borrow (amount uint))
-  (begin
-    (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (var-set min-sbtc-borrow amount)
-    (ok true)))
-
-;; ---------- Funding ----------
-
-(define-public (fund (amount uint))
-  (let ((caller tx-sender)
-        (new-liquid (+ (var-get available-sbtc) amount)))
-    (asserts! (is-eq caller LENDER) ERR-NOT-LENDER)
-    (try! (contract-call? SBTC transfer amount caller current-contract none))
-    (var-set available-sbtc new-liquid)
-    (print { event: "fund", amount: amount, available-sbtc: new-liquid })
-    (ok true)))
-
-(define-public (withdraw-funds (amount uint))
-  (let ((caller tx-sender)
-        (liquid (var-get available-sbtc)))
-    (asserts! (is-eq caller LENDER) ERR-NOT-LENDER)
-    (asserts! (<= amount liquid) ERR-INSUFFICIENT-FUNDS)
-    (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
-      (try! (contract-call? SBTC transfer amount current-contract caller none))))
-    (var-set available-sbtc (- liquid amount))
-    (print { event: "withdraw-funds", amount: amount, available-sbtc: (- liquid amount) })
-    (ok true)))
-
 ;; ---------- Loan lifecycle ----------
 
-;; Step 1: lock sBTC, create loan, start clawback deadline.
+;; Step 1: pull sBTC from reserve, create loan, start clawback deadline.
 (define-public (borrow (amount uint))
   (let ((caller tx-sender)
-        (loan-id (var-get next-loan-id))
-        (liquid (var-get available-sbtc)))
+        (loan-id (var-get next-loan-id)))
     (asserts! (is-eq caller BORROWER) ERR-NOT-BORROWER)
     (asserts! (is-none (var-get active-loan)) ERR-ACTIVE-LOAN-EXISTS)
-    (asserts! (>= amount (var-get min-sbtc-borrow)) ERR-AMOUNT-TOO-LOW)
-    (asserts! (<= amount liquid) ERR-INSUFFICIENT-FUNDS)
-    (var-set available-sbtc (- liquid amount))
+    (asserts! (>= amount MIN-SBTC-BORROW) ERR-AMOUNT-TOO-LOW)
+    (try! (contract-call? LENDER disburse amount))
     (map-set loans loan-id {
       sbtc-principal: amount,
-      interest-bps: (var-get interest-bps),
+      interest-bps: INTEREST-BPS,
       jing-cycle: u0,
       deadline: (+ burn-block-height CLAWBACK-DELAY),
       stx-collateral: u0,
@@ -165,17 +128,15 @@
              limit: limit-price, cycle: jing-cycle })
     (ok true)))
 
-;; Escape hatch: cancel Jing deposit. sBTC returns to the contract.
-;; Loan state is unchanged (still SWAP-DEPOSITED); the recovered sBTC sits in
-;; the contract and offsets the borrower's out-of-pocket at repay.
-;; Callable by borrower anytime; also by lender after the deadline to unblock seize.
+;; Pull sBTC back from Jing. Loan stays SWAP-DEPOSITED; recovered sBTC
+;; sits on contract and is reconciled at repay/seize via excess-sbtc.
+;; Borrower anytime; anyone after deadline.
 (define-public (cancel-swap (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
         (caller tx-sender))
     (asserts! (is-eq (get status loan) SWAP-DEPOSITED) ERR-BAD-STATUS)
     (asserts! (or (is-eq caller BORROWER)
-                  (and (is-eq caller LENDER)
-                       (>= burn-block-height (get deadline loan))))
+                  (>= burn-block-height (get deadline loan)))
               ERR-NOT-BORROWER)
     (try! (as-contract? ((with-all-assets-unsafe))
       (try! (contract-call? JING-MARKET cancel-sbtc-deposit))))
@@ -187,28 +148,26 @@
         (caller tx-sender))
     (asserts! (is-eq caller BORROWER) ERR-NOT-BORROWER)
     (asserts! (is-eq (get status loan) SWAP-DEPOSITED) ERR-BAD-STATUS)
-    (map-set loans loan-id (merge loan {
-      limit-price: limit-price
-    }))
+    (map-set loans loan-id (merge loan { limit-price: limit-price }))
     (try! (as-contract? ()
       (try! (contract-call? JING-MARKET set-sbtc-limit limit-price))))
     (print { event: "set-swap-limit", limit-price: limit-price })
     (ok true)))
 
-;; ;; Step 3: snapshot STX collateral. Requires that no sBTC remains in Jing
-;; ;; (all cleared or cancelled). Current cycle advancing is not sufficient on
-;; ;; its own; rollovers can delay full resolution across multiple cycles.
-;; (define-public (record-stx-collateral (loan-id uint))
-;;   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
-;;         (stx-balance (stx-get-balance current-contract)))
-;;     (asserts! (is-eq (get status loan) SWAP-DEPOSITED) ERR-BAD-STATUS)
-;;     (asserts! (is-eq u0 (our-sbtc-in-jing
-;;                           (contract-call? JING-MARKET get-current-cycle)))
-;;               ERR-NOT-FULLY-RESOLVED)
-;;       (asserts! (> stx-balance u0) ERR-NOTHING-TO-ATTRIBUTE)
-;;       (map-set loans loan-id (merge loan { stx-collateral: stx-balance }))
-;;       (print { event: "record-stx-collateral", loan-id: loan-id, stx: stx-balance })
-;;       (ok stx-balance)))
+;; Pre-swap abandon. Principal returns to reserve.
+(define-public (cancel (loan-id uint))
+  (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
+        (caller tx-sender)
+        (principal (get sbtc-principal loan)))
+    (asserts! (is-eq caller BORROWER) ERR-NOT-BORROWER)
+    (asserts! (is-eq (get status loan) STATUS-PRE-SWAP) ERR-BAD-STATUS)
+    (try! (as-contract? ((with-ft SBTC "sbtc-token" principal))
+      (try! (contract-call? SBTC transfer principal current-contract LENDER none))))
+    (try! (contract-call? LENDER notify-return principal))
+    (map-set loans loan-id (merge loan { status: STATUS-CANCELLED }))
+    (var-set active-loan none)
+    (print { event: "cancel", loan-id: loan-id, principal-returned: principal })
+    (ok true)))
 
 (define-public (repay (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
@@ -216,8 +175,9 @@
         (notional (get sbtc-principal loan))
         (owed (+ notional (/ (* notional (get interest-bps loan)) BPS_PRECISION)))
         (stx-out (stx-get-balance current-contract))
-        (excess-sbtc (- (unwrap-panic (contract-call? SBTC get-balance current-contract))
-                          (var-get available-sbtc))) ;; this belongs to the borrower and available belongs to the lender
+        ;; No prefunded lender capital in v2, so any sBTC on-contract is
+        ;; borrower-side recovery (Jing eviction, cancel-swap, airdrop).
+        (excess-sbtc (unwrap-panic (contract-call? SBTC get-balance current-contract)))
         (shortfall (if (> owed excess-sbtc) (- owed excess-sbtc) u0))
         (refund (if (> excess-sbtc owed) (- excess-sbtc owed) u0)))
     (asserts! (is-eq caller BORROWER) ERR-NOT-BORROWER)
@@ -225,52 +185,58 @@
     (asserts! (is-eq u0 (our-sbtc-in-jing
                           (contract-call? JING-MARKET get-current-cycle)))
               ERR-NOT-FULLY-RESOLVED)
-    ;; Borrower tops up the contract with whatever's missing to cover `owed`
+    ;; Borrower tops up whatever is missing to cover `owed`
     (if (> shortfall u0)
       (try! (contract-call? SBTC transfer shortfall caller current-contract none))
       true)
-    ;; Refund any contract sBTC beyond owed back to borrower (almost never happens except contract airdrop random)
+    ;; Refund any sBTC beyond owed back to borrower (rare)
     (if (> refund u0)
       (try! (as-contract? ((with-ft SBTC "sbtc-token" refund))
         (try! (contract-call? SBTC transfer refund current-contract BORROWER none))))
       true)
-    ;; Contract pays the full owed amount to lender
+    ;; Pay owed (principal + interest) to reserve
     (try! (as-contract? ((with-ft SBTC "sbtc-token" owed))
       (try! (contract-call? SBTC transfer owed current-contract LENDER none))))
-    ;; Any STX collateral to borrower (may be 0 if full cancel-swap)
+    ;; STX collateral to borrower
     (if (> stx-out u0)
       (try! (as-contract? ((with-stx stx-out))
         (try! (stx-transfer? stx-out current-contract BORROWER))))
       true)
+    (try! (contract-call? LENDER notify-return notional))
     (map-set loans loan-id (merge loan { stx-collateral: stx-out, status: STATUS-REPAID }))
     (var-set active-loan none)
     (print { event: "repay", loan-id: loan-id, sbtc-owed: owed,
-              from-borrower: shortfall, refund: refund, stx-released: stx-out })
+             from-borrower: shortfall, refund: refund, stx-released: stx-out })
     (ok true)))
 
+;; Permissionless past-deadline seize. Works for PRE-SWAP (never swapped)
+;; or SWAP-DEPOSITED (fully resolved). All on-contract sBTC + STX ships
+;; to the reserve.
 (define-public (seize (loan-id uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
-        (caller tx-sender)
+        (status (get status loan))
+        (notional (get sbtc-principal loan))
         (stx-out (stx-get-balance current-contract))
-        (excess-sbtc (- (unwrap-panic (contract-call? SBTC get-balance current-contract))
-                          (var-get available-sbtc))))
-    (asserts! (is-eq caller LENDER) ERR-NOT-LENDER)
-    (asserts! (is-eq (get status loan) SWAP-DEPOSITED) ERR-BAD-STATUS)
+        (excess-sbtc (unwrap-panic (contract-call? SBTC get-balance current-contract))))
+    (asserts! (or (is-eq status STATUS-PRE-SWAP)
+                  (is-eq status SWAP-DEPOSITED)) ERR-BAD-STATUS)
     (asserts! (>= burn-block-height (get deadline loan)) ERR-DEADLINE-NOT-REACHED)
-    (asserts! (is-eq u0 (our-sbtc-in-jing
-                          (contract-call? JING-MARKET get-current-cycle)))
-              ERR-NOT-FULLY-RESOLVED)
-    ;; STX collateral to lender (may be 0 if full cancel-swap)
+    (if (is-eq status SWAP-DEPOSITED)
+      (asserts! (is-eq u0 (our-sbtc-in-jing
+                            (contract-call? JING-MARKET get-current-cycle)))
+                ERR-NOT-FULLY-RESOLVED)
+      true)
     (if (> stx-out u0)
       (try! (as-contract? ((with-stx stx-out))
         (try! (stx-transfer? stx-out current-contract LENDER))))
       true)
-    ;; Any recovered sBTC (from cancel-swap) to lender as partial principal recovery
     (if (> excess-sbtc u0)
       (try! (as-contract? ((with-ft SBTC "sbtc-token" excess-sbtc))
         (try! (contract-call? SBTC transfer excess-sbtc current-contract LENDER none))))
       true)
+    (try! (contract-call? LENDER notify-return notional))
     (map-set loans loan-id (merge loan { status: STATUS-SEIZED }))
     (var-set active-loan none)
-    (print { event: "seize", loan-id: loan-id, stx-seized: stx-out, sbtc-seized: excess-sbtc })
+    (print { event: "seize", loan-id: loan-id, status-was: status,
+             stx-seized: stx-out, sbtc-seized: excess-sbtc })
     (ok true)))
