@@ -424,6 +424,61 @@ The ~1.2% premium is the loan interest (1% flat + small rounding).
   confirming the accounting boundary between lender-owned and
   borrower-collateral funds.
 
+## Simulation 6: Withdraw-funds paths and guards (`simul-jing-loan-withdraw-funds.js`)
+
+Exhaustive test of `fund` / `withdraw-funds`, including the two guards
+(`ERR-NOT-LENDER`, `ERR-INSUFFICIENT-FUNDS`) and the key invariant:
+**borrowed principal cannot be withdrawn by the lender**.
+
+```bash
+npx tsx simulations/simul-jing-loan-withdraw-funds.js
+```
+
+https://stxer.xyz/simulations/mainnet/422e5b3a62724e5c029224a8df66ccc1
+
+### Flow
+
+```
+SBTC_WHALE → LENDER                              (1 sBTC seed)
+  → LENDER.fund(50M)           available=50M
+  → LENDER.withdraw-funds(20M) available=30M
+  → LENDER.withdraw-funds(30M) available=0       [drain test]
+  → LENDER.fund(40M)           available=40M
+  → BORROWER.borrow(30M)       available=10M     [30M now sealed]
+  → LENDER.withdraw-funds(25M)                   [err u103 — over-withdraw guard]
+  → BORROWER.withdraw-funds(10M)                 [err u100 — auth guard]
+  → LENDER.withdraw-funds(10M) available=0       [legitimate pull]
+```
+
+### Key results
+
+| Step | Call | Result |
+|------|------|--------|
+| 3 | `fund(50M)` | `(ok true)`, available = 50M |
+| 5 | `withdraw-funds(20M)` | `(ok true)`, available = 30M |
+| 7 | `withdraw-funds(30M)` (drain) | `(ok true)`, available = 0 |
+| 9 | `fund(40M)` | `(ok true)`, available = 40M |
+| 11 | `borrow(30M)` | `(ok u1)`, available = 10M |
+| 14 | `withdraw-funds(25M)` (LENDER) | **`(err u103)`** ERR-INSUFFICIENT-FUNDS |
+| 16 | `withdraw-funds(10M)` (BORROWER) | **`(err u100)`** ERR-NOT-LENDER |
+| 19 | `withdraw-funds(10M)` (LENDER) | `(ok true)`, available = 0 |
+| 21 | Contract sBTC balance | **`u30000000`** — exactly the active loan's principal |
+
+### What this proves
+
+- **Lender lock-out on borrowed funds.** After `borrow(30M)`, the guard
+  `(asserts! (<= amount liquid) ERR-INSUFFICIENT-FUNDS)` uses `available-sbtc`
+  (not the contract's full sBTC balance), so the 30M principal sealed in the
+  active loan is **untouchable** by `withdraw-funds`. The lender can only
+  reach it through `repay` (borrower cooperation) or `seize` (post-deadline
+  default) — exactly the intended trust model.
+- **Authorization guard.** `(asserts! (is-eq caller LENDER) ERR-NOT-LENDER)`
+  blocks any other caller from draining the pool, including BORROWER.
+- **Over-withdraw guard preserves state.** Both failed `withdraw-funds`
+  attempts left `available-sbtc` intact (step 15, 17, 18 all show `u10000000`
+  and `(some u1)`), proving assertion failures revert cleanly without
+  corrupting state.
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
