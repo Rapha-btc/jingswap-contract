@@ -64,7 +64,11 @@ Each passes in isolation — run with `-t` filter:
 - **Boundaries**: borrow at exact min, borrow at exact available, withdraw exact available
 - **Invariants**: contract sBTC balance = available-sbtc + committed (pre-swap / post-cancel); = available-sbtc (post-swap-in-Jing)
 
-**Why skipped**: running with the core 23 triggers remote_data state drift in vitest's `isolate: true` mode — LENDER's sBTC transfer returns `err u1`, Jing's `paused` var returns `None` from forked state. Tests pass individually.
+**Why skipped — root cause: Hiro API rate limiting.** Each test re-initializes simnet (default `--init-before-each=true`), which re-fetches mainnet state from `https://api.hiro.so`. With 37+ tests the anonymous rate limit (~20 req/min) is exceeded, and silently-failed API calls return invalid state (LENDER sBTC err u1, Jing `paused` as `None`, cycle var as `None`, etc).
+
+**To fix permanently:** set a Hiro API key to raise the rate limit (100 req/min free tier, higher on paid). Add `api_key` to `[repl.remote_data]` in Clarinet.toml, or export `HIRO_API_KEY`. With that, all skipped tests should bundle cleanly.
+
+**Workaround without key:** run tests in small batches via `-t` filter.
 
 **To run extended tests**:
 ```bash
@@ -81,7 +85,7 @@ Remove `describe.skip` to run them bundled (expect drift-related failures).
 
 ### E2E suite (3 tests, opt-in via `E2E=1` env var)
 
-Off by default because Jing settlement mutates the forked state, corrupting subsequent core tests. Run with:
+Off by default because (a) Jing settlement adds many cross-contract reads to the forked mainnet state, amplifying Hiro API rate-limit pressure (see Extended Suite section for root cause), and (b) non-deterministic VM token-supply bug can still trigger intermittently. Run with:
 
 ```bash
 E2E=1 npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "fund → borrow"
