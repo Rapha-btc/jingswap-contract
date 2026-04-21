@@ -79,14 +79,26 @@ Remove `describe.skip` to run them bundled (expect drift-related failures).
 
 ## Gaps — not yet tested
 
-### Happy path (end-to-end with real Jing settlement)
-- **Scaffold exists, marked `describe.skip`** — see `happy path e2e (VM-gated)` in the test file
-  - Fetches live Pyth VAA from Hermes, adds STX-side depositor, calls `close-and-settle-with-refresh` on deployed Jing, verifies STX released on repay
-  - **Blocked by Clarinet VM bug**: `"ERROR: Clarity VM failed to track token supply"` non-deterministically triggers on cross-contract sBTC transfers during Jing's settle. Same bug documented in `sbtc-stx-0-v2.test.ts` (even on clarinet-sdk 3.16+)
-  - Orchestration is correct — the stxer simulation at `simulations/simul-jing-loan-true-happy-path.js` runs this flow successfully on mainnet fork
-  - Remove `.skip` to retry when SDK fixes it
-- **Borrow → swap → Jing settles → seize STX collateral**
-  - Same orchestration + fast-forward past deadline + lender calls seize with real STX balance
+### E2E suite (3 tests, opt-in via `E2E=1` env var)
+
+Off by default because Jing settlement mutates the forked state, corrupting subsequent core tests. Run with:
+
+```bash
+E2E=1 npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "fund → borrow"
+E2E=1 npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "seize-after-settle"
+E2E=1 npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "partial-cancel"
+```
+
+Each test:
+1. Fetches live Pyth VAA from Hermes API
+2. Sets up fund/borrow/swap-deposit
+3. Adds STX-side depositor on deployed Jing (wallet_1 with low limit)
+4. Calls `close-and-settle-with-refresh` with fetched VAA → STX lands in loan contract
+5. Exercises repay or seize path + verifies balance movements
+
+**Happy path verified working.** Fund → borrow → swap → settle → repay releases STX to borrower ✓
+
+Non-deterministic VM bug (`failed to track token supply`) may trigger during Jing's `distribute-to-sbtc-depositor`; each test wraps settlement in try/catch and log-skips on that error (matches `sbtc-stx-0-v2.test.ts` pattern).
 
 ### Partial-cancel scenarios
 - **Cancel after partial Jing clear**
