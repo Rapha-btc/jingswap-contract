@@ -652,6 +652,73 @@ the loan closes — useful for reconstructing the borrower's price decisions.
   loan would hit `u106` first, not `u101`. (Simulation 7 documents this
   ordering for `cancel-swap`.)
 
+## Simulation 10: Admin setters + rate-locking invariant (`simul-jing-loan-admin.js`)
+
+Proves the admin setters (`set-interest-bps`, `set-min-sbtc-borrow`) work for
+LENDER, and the critical invariant that rate changes **do NOT retroactively
+alter in-flight loans** — each loan's `interest-bps` is frozen at `borrow`
+time.
+
+```bash
+npx tsx simulations/simul-jing-loan-admin.js
+```
+
+https://stxer.xyz/simulations/mainnet/e0db55e7aa73c269f73f4817254490c2
+
+### Flow
+
+```
+fund(60M)
+  → borrow(20M)                           [loan u1 at interest-bps u100]
+  → set-interest-bps(400)                 [global rate → 4%]
+  → set-min-sbtc-borrow(5M)                [global min → 5M]
+  → verify loan u1 STILL at u100
+  → swap-deposit + cancel-swap + repay(1) [settles at u100, owed 20.2M]
+  → borrow(2M) BELOW new min               [err u102]
+  → borrow(15M)                            [loan u2 at interest-bps u400]
+  → verify both loans coexist with different rates
+```
+
+### Rate-locking invariant proof
+
+| Step | Read | Before setter (loan u1 PRE-SWAP, default rate) | After setter (rate bumped to u400) |
+|------|------|------------------------------------------------|------------------------------------|
+| 8 / 14 | `(get-loan u1)` interest-bps | `u100` | **`u100`** — unchanged |
+| 9 / 15 | `(owed-on-loan u1)` | `u20200000` | **`u20200000`** — unchanged |
+
+After repay (step 18), the loan settled at its original u100 rate:
+`(sbtc-owed u20200000, from-borrower u200000)`. The 4× global rate bump was
+never applied to this loan.
+
+### Min-borrow guard takes effect immediately
+
+| Step | Call | Result |
+|------|------|--------|
+| 12 | `set-min-sbtc-borrow(5M)` | `(ok true)`, global `u5000000` |
+| 19 | `borrow(2M)` (≥ old u1M, < new u5M) | `(err u102)` ERR-AMOUNT-TOO-LOW |
+| 20 | `borrow(15M)` (≥ new u5M) | `(ok u2)` |
+
+### Two loans, two rates, one contract
+
+After the full flow:
+- Loan u1: `interest-bps u100`, `status u2` (REPAID), principal 20M, owed 20.2M
+- Loan u2: `interest-bps u400`, `status u0` (PRE-SWAP), principal 15M, owed 15.6M
+
+Both queryable from the same contract. The `interest-bps` field on each
+loan record is the source of truth for that loan's rate — the global
+`interest-bps` var is only the *next-borrow default*.
+
+### What this proves
+
+- **LENDER admin setters work** through the `is-eq tx-sender LENDER` guard.
+  (Non-LENDER path already covered by simulation 7.)
+- **Historical loans are immutable under rate changes.** This is the
+  contract's core trust invariant for borrowers: "the rate you see at
+  `borrow` is the rate you pay at `repay`" holds even when the lender
+  changes the global setter mid-flight.
+- **`set-min-sbtc-borrow` gates the next `borrow` immediately**, without
+  affecting the current active loan or any queued-but-unstarted work.
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
