@@ -592,6 +592,66 @@ Loan 2: borrow(25M) → swap-deposit → cancel-swap → repay
   loan u2 completes — the contract keeps a permanent loan log, not just the
   active one.
 
+## Simulation 9: set-swap-limit relay (`simul-jing-loan-set-swap-limit.js`)
+
+Proves that a borrower can update their active Jing deposit's limit-price
+without cancel-swap-ing. Relays through the contract's `as-contract?`
+wrapper to Jing v2's `set-sbtc-limit`. Also the first simulation to
+exercise the `(as-contract? (()) ...)` empty-guard Clarity 4 syntax.
+
+```bash
+npx tsx simulations/simul-jing-loan-set-swap-limit.js
+```
+
+https://stxer.xyz/simulations/mainnet/dfdfe3bacb053d22429233272f6c1699
+
+### Flow
+
+```
+fund → borrow → swap-deposit(initial=311,526.48 STX/BTC)
+  → set-swap-limit(new=280,000.00 STX/BTC)     [happy path]
+  → LENDER set-swap-limit                      [err u101]
+  → set-swap-limit(999, …) non-existent loan   [err u105]
+  → cancel-swap + repay                         [clean up]
+  → set-swap-limit on REPAID loan              [err u106]
+```
+
+### Happy path (step 8)
+
+Two events emitted on the relay:
+- Jing: `(tuple (depositor <contract>) (event "set-sbtc-limit") (limit u28000000000000))`
+- Contract: `(tuple (event "set-swap-limit") (limit-price u28000000000000))`
+
+Post-call (step 9): `(get-loan u1)` shows `limit-price u28000000000000` — both our
+record and Jing's stored per-depositor limit were updated atomically.
+
+### Guards exercised
+
+| Step | Call | Result |
+|------|------|--------|
+| 10 | LENDER `set-swap-limit` | `(err u101)` ERR-NOT-BORROWER |
+| 11 | post-failed-call state | `limit-price u28000000000000` — unchanged |
+| 12 | BORROWER `set-swap-limit(999, …)` | `(err u105)` ERR-LOAN-NOT-FOUND |
+| 16 | BORROWER `set-swap-limit` on REPAID loan | `(err u106)` ERR-BAD-STATUS |
+
+### Historical limit preserved on REPAID loan
+
+Step 15's post-repay read shows `limit-price u28000000000000` still on the
+loan record. The final updated value persists in the audit trail even after
+the loan closes — useful for reconstructing the borrower's price decisions.
+
+### What this proves
+
+- **`as-contract? (())` empty-guard pattern compiles and executes** in
+  Clarity 4 on mainnet — the contract can call into an external public
+  function without transferring assets in either direction.
+- **Full relay semantics** — our `set-swap-limit` mutates both our local
+  loan record and Jing's stored per-depositor limit in one transaction.
+- **Assertion order** — the status check (`SWAP-DEPOSITED`) fires before the
+  caller check, same as `cancel-swap`. A non-borrower calling on a non-active
+  loan would hit `u106` first, not `u101`. (Simulation 7 documents this
+  ordering for `cancel-swap`.)
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
