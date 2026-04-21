@@ -35,6 +35,9 @@ contract_id = "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx"
 [[project.requirements]]
 contract_id = "SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10"
 
+[[project.requirements]]
+contract_id = "SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2"
+
 # [contracts.counter]
 # path = "contracts/counter.clar"
 # epoch = "latest"
@@ -94,19 +97,19 @@ epoch = "latest"
 # epoch = "latest"
 
 [contracts.jing-core]
-path = "contracts/jing-vault-registry.clar"
+path = "contracts/jing-core.clar"
 clarity_version = 4
 epoch = "latest"
 
-[contracts.jing-loan-sbtc-for-stx]
-path = "contracts/jing-loan-sbtc-for-stx.clar"
-clarity_version = 4
-epoch = "latest"
+# [contracts.jing-loan-sbtc-for-stx]
+# path = "contracts/jing-loan-sbtc-for-stx.clar"
+# clarity_version = 4
+# epoch = "latest"
 
 [contracts.jing-loan-sbtc-stx-single]
 path = "contracts/jing-loan-sbtc-stx-single.clar"
-clarity_version = 4
-epoch = "latest"
+clarity_version = 5
+epoch = "3.4"
 
 # [contracts.jing-vault-v1]
 # path = "contracts/jing-vault-v1.clar"
