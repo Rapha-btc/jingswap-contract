@@ -54,6 +54,29 @@ Requires:
 - `seize: rejects before deadline`
 - `seize: lender seizes after deadline + cancel, recovers sBTC`
 
+## Extended suite (14 tests, `describe.skip` by default)
+
+Each passes in isolation — run with `-t` filter:
+
+- **set-swap-limit**: non-borrower rejection, pre-swap status guard, unknown loan-id, happy path (updates Jing limit)
+- **record-stx-collateral**: PRE-SWAP status guard, not-fully-resolved guard, unknown loan-id
+- **Sequential loans**: borrow → full-cancel → repay-interest → re-borrow
+- **Boundaries**: borrow at exact min, borrow at exact available, withdraw exact available
+- **Invariants**: contract sBTC balance = available-sbtc + committed (pre-swap / post-cancel); = available-sbtc (post-swap-in-Jing)
+
+**Why skipped**: running with the core 23 triggers remote_data state drift in vitest's `isolate: true` mode — LENDER's sBTC transfer returns `err u1`, Jing's `paused` var returns `None` from forked state. Tests pass individually.
+
+**To run extended tests**:
+```bash
+npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "set-swap-limit"
+npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "record-stx-collateral"
+npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "sequential loans"
+npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "invariant"
+npx vitest run tests/jing-loan-sbtc-stx-single.test.ts -t "exact"
+```
+
+Remove `describe.skip` to run them bundled (expect drift-related failures).
+
 ## Gaps — not yet tested
 
 ### Happy path (end-to-end with real Jing settlement)
