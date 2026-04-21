@@ -57,10 +57,11 @@ Requires:
 ## Gaps — not yet tested
 
 ### Happy path (end-to-end with real Jing settlement)
-- **Borrow → swap → Jing cycle settles → repay with STX collateral released**
-  - Requires orchestrating another STX-side depositor on Jing, calling `close-deposits` + `settle-with-refresh` (with Pyth VAA buffers), then verifying the loan contract receives STX pro-rata
-  - Missing: interest math verification across multiple bps values
-  - Missing: STX transfer to borrower on successful repay
+- **Scaffold exists, marked `describe.skip`** — see `happy path e2e (VM-gated)` in the test file
+  - Fetches live Pyth VAA from Hermes, adds STX-side depositor, calls `close-and-settle-with-refresh` on deployed Jing, verifies STX released on repay
+  - **Blocked by Clarinet VM bug**: `"ERROR: Clarity VM failed to track token supply"` non-deterministically triggers on cross-contract sBTC transfers during Jing's settle. Same bug documented in `sbtc-stx-0-v2.test.ts` (even on clarinet-sdk 3.16+)
+  - Orchestration is correct — the stxer simulation at `simulations/simul-jing-loan-true-happy-path.js` runs this flow successfully on mainnet fork
+  - Remove `.skip` to retry when SDK fixes it
 - **Borrow → swap → Jing settles → seize STX collateral**
   - Same orchestration + fast-forward past deadline + lender calls seize with real STX balance
 
