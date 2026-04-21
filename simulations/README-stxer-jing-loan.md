@@ -531,6 +531,67 @@ caller authorization check. So a non-borrower calling on a PRE-SWAP loan will
 err with `u106` (BAD-STATUS), not `u101` (NOT-BORROWER). Order matters for
 fuzzers and downstream callers — don't assume these errors are interchangeable.
 
+## Simulation 8: Multiple serial loans (`simul-jing-loan-serial.js`)
+
+Proves that a single deployment supports multiple loans in sequence. After
+`repay`, `active-loan` clears cleanly and `next-loan-id` increments, so a
+second `borrow` creates a fresh loan record without interfering with the
+history.
+
+```bash
+npx tsx simulations/simul-jing-loan-serial.js
+```
+
+https://stxer.xyz/simulations/mainnet/ba3a0fb21e618011d3b85dd26fcd4fa2
+
+### Flow
+
+```
+Loan 1: borrow(20M) → swap-deposit → cancel-swap → repay
+  [loan u1 → status u2, active-loan → none, next-loan-id → u2]
+Loan 2: borrow(25M) → swap-deposit → cancel-swap → repay
+  [loan u2 → status u2, active-loan → none]
+```
+
+### Key transitions
+
+| After | `get-active-loan` | `get-available-sbtc` | loan u1 status | loan u2 status |
+|-------|-------------------|----------------------|----------------|-----------------|
+| fund 60M | `none` | `60M` | — | — |
+| Loan 1 borrow(20M) | `(some u1)` | `40M` | `u0` | — |
+| Loan 1 repay | `none` | `40M` | `u2` (REPAID) | — |
+| Loan 2 borrow(25M) | `(some u2)` | `15M` | `u2` preserved | `u0` (fresh) |
+| Loan 2 repay | `none` | `15M` | `u2` | `u2` (REPAID) |
+
+### Transfers proven
+
+| Loan | Shortfall (borrower pays) | Owed (contract → lender) |
+|------|-----------------------------|--------------------------|
+| 1 | 200,000 (1% × 20M) | 20,200,000 |
+| 2 | 250,000 (1% × 25M) | 25,250,000 |
+
+### Final balances
+
+| Actor | sBTC Δ |
+|-------|--------|
+| LENDER | +450,000 (1% interest on 45M total principal cycled) |
+| BORROWER | −450,000 (shortfalls on both loans) |
+| Contract | +15M sBTC = `available-sbtc` (untouched leftover from the fund) |
+| sBTC whale | −105M (seed to both parties) |
+
+### What this proves
+
+- **`active-loan` clears to `none` after `repay`.** Without this, the second
+  `borrow` would fail with `ERR-ACTIVE-LOAN-EXISTS` (u104).
+- **`next-loan-id` increments monotonically.** Second `borrow` returned
+  `(ok u2)`.
+- **Fresh loan state on subsequent borrows.** Loan u2's `jing-cycle`, `limit-price`,
+  and `stx-collateral` all started at zero (not carried over from u1).
+- **Historical loans are preserved.** Loan u1's final state (`status u2`,
+  recorded `jing-cycle u3`, recorded `limit-price`) is still queryable after
+  loan u2 completes — the contract keeps a permanent loan log, not just the
+  active one.
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
