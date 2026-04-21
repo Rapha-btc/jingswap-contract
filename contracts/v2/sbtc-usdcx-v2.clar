@@ -5,7 +5,7 @@
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
 
-(define-constant DEPOSIT_MIN_BLOCKS u10)
+(define-constant DEPOSIT_MIN_BLOCKS u0)
 (define-constant CANCEL_THRESHOLD u42)
 
 (define-constant PHASE_DEPOSIT u0)
@@ -77,6 +77,16 @@
 (define-data-var acc-usdcx-out uint u0)
 (define-data-var acc-usdcx-rolled uint u0)
 (define-data-var acc-sbtc-rolled uint u0)
+
+;; Per-call caller outcome snapshot. Populated during distribute-to-* when the
+;; iterated depositor matches tx-sender, so settle can return the caller's fill
+;; in its response tuple and enable atomic DeFi composition.
+(define-data-var caller-usdcx-cleared uint u0)
+(define-data-var caller-sbtc-received uint u0)
+(define-data-var caller-usdcx-rolled uint u0)
+(define-data-var caller-sbtc-cleared uint u0)
+(define-data-var caller-usdcx-received uint u0)
+(define-data-var caller-sbtc-rolled uint u0)
 
 (define-data-var settle-clearing-price uint u0)
 
@@ -532,11 +542,22 @@
     (var-set acc-usdcx-out u0)
     (var-set acc-usdcx-rolled u0)
     (var-set acc-sbtc-rolled u0)
+    (var-set caller-usdcx-cleared u0)
+    (var-set caller-sbtc-received u0)
+    (var-set caller-usdcx-rolled u0)
+    (var-set caller-sbtc-cleared u0)
+    (var-set caller-usdcx-received u0)
+    (var-set caller-sbtc-rolled u0)
     (map distribute-to-usdcx-depositor (get-usdcx-depositors cycle))
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
     (try! (roll-and-sweep-dust))
     (advance-cycle)
-    (ok true)))
+    (ok { usdcx-cleared: (var-get caller-usdcx-cleared),
+          sbtc-received: (var-get caller-sbtc-received),
+          usdcx-rolled: (var-get caller-usdcx-rolled),
+          sbtc-cleared: (var-get caller-sbtc-cleared),
+          usdcx-received: (var-get caller-usdcx-received),
+          sbtc-rolled: (var-get caller-sbtc-rolled) })))
 
 (define-public (settle-with-refresh
   (btc-vaa (buff 8192))
@@ -575,11 +596,22 @@
       (var-set acc-usdcx-out u0)
       (var-set acc-usdcx-rolled u0)
       (var-set acc-sbtc-rolled u0)
+      (var-set caller-usdcx-cleared u0)
+      (var-set caller-sbtc-received u0)
+      (var-set caller-usdcx-rolled u0)
+      (var-set caller-sbtc-cleared u0)
+      (var-set caller-usdcx-received u0)
+      (var-set caller-sbtc-rolled u0)
       (map distribute-to-usdcx-depositor (get-usdcx-depositors cycle))
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
       (try! (roll-and-sweep-dust))
       (advance-cycle)
-      (ok true))))
+      (ok { usdcx-cleared: (var-get caller-usdcx-cleared),
+            sbtc-received: (var-get caller-sbtc-received),
+            usdcx-rolled: (var-get caller-usdcx-rolled),
+            sbtc-cleared: (var-get caller-sbtc-cleared),
+            usdcx-received: (var-get caller-usdcx-received),
+            sbtc-rolled: (var-get caller-sbtc-rolled) }))))
 
 (define-public (close-and-settle-with-refresh
   (btc-vaa (buff 8192))
@@ -589,8 +621,7 @@
   (wormhole-core <wormhole-core-trait>))
   (begin
     (try! (close-deposits))
-    (try! (settle-with-refresh btc-vaa stx-vaa pyth-storage pyth-decoder wormhole-core))
-    (ok true)))
+    (settle-with-refresh btc-vaa stx-vaa pyth-storage pyth-decoder wormhole-core)))
 
 (define-public (cancel-cycle)
   (let (
@@ -708,6 +739,13 @@
     (map-delete usdcx-deposits { cycle: cycle, depositor: depositor })
     (var-set acc-sbtc-out (+ (var-get acc-sbtc-out) my-sbtc-received))
     (var-set acc-usdcx-rolled (+ (var-get acc-usdcx-rolled) my-usdcx-unfilled))
+    (if (is-eq depositor tx-sender)
+      (begin
+        (var-set caller-usdcx-cleared my-usdcx-cleared)
+        (var-set caller-sbtc-received my-sbtc-received)
+        (var-set caller-usdcx-rolled my-usdcx-unfilled)
+        true)
+      true)
     (if (> my-sbtc-received u0)
       (try! (as-contract? ((with-ft 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token "sbtc-token" my-sbtc-received))
         (try! (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
@@ -741,6 +779,13 @@
     (map-delete sbtc-deposits { cycle: cycle, depositor: depositor })
     (var-set acc-usdcx-out (+ (var-get acc-usdcx-out) my-usdcx-received))
     (var-set acc-sbtc-rolled (+ (var-get acc-sbtc-rolled) my-sbtc-unfilled))
+    (if (is-eq depositor tx-sender)
+      (begin
+        (var-set caller-sbtc-cleared my-sbtc-cleared)
+        (var-set caller-usdcx-received my-usdcx-received)
+        (var-set caller-sbtc-rolled my-sbtc-unfilled)
+        true)
+      true)
     (if (> my-usdcx-received u0)
       (try! (as-contract? ((with-ft 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx "usdcx-token" my-usdcx-received))
         (try! (contract-call? 'SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx
