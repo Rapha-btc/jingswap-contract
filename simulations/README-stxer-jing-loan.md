@@ -321,6 +321,109 @@ reducing shortfall). A future simulation should construct that scenario by
 swap-depositing an amount larger than the currently-available STX total on the
 other side of the market.
 
+## Simulation 5: TRUE happy path with STX-binding rollover (`simul-jing-loan-rollover.js`)
+
+Flip side of Simulation 4. The loan principal (80M sats ≈ 0.8 BTC) is
+deliberately larger than Jing's STX side can absorb, so STX becomes the
+binding side: all STX is consumed, a portion of our sBTC rolls to Jing's next
+cycle. BORROWER then calls `cancel-swap(1)` on the new cycle to pull the
+rolled sBTC back. `repay` correctly folds the recovered amount into
+`excess-sbtc`, reducing the borrower's shortfall.
+
+```bash
+npx tsx simulations/simul-jing-loan-rollover.js
+```
+
+https://stxer.xyz/simulations/mainnet/851896b82017fa5fb212971b95b82abf
+
+### Flow
+
+```
+SBTC_WHALE → LENDER       (1 sBTC seed — LENDER mainnet balance is ~0.22)
+SBTC_WHALE → BORROWER     (0.85 sBTC — covers full repay shortfall)
+  → LENDER.fund(100M)
+  → BORROWER.borrow(80M)
+  → BORROWER.swap-deposit(1, 31_152_648_000_000)    [Jing cycle 3, 80M sats]
+  → jing.close-and-settle-with-refresh(vaa, vaa, …)
+       [STX binding: ~72.5M cleared, ~7.5M rolls to cycle 4]
+  → BORROWER.cancel-swap(1)                          [pulls 7.5M back from cycle 4]
+  → BORROWER.repay(1)
+```
+
+### Live price fetched
+
+| Feed | Price |
+|------|-------|
+| BTC/USD | $75,792.53 |
+| STX/USD | $0.2236 |
+
+### Jing settlement (step 9)
+
+| Field | Value |
+|-------|-------|
+| binding-side | `"stx"` — all STX consumed, sBTC partial |
+| oracle-price | `u33890157813263` (~338,901 STX/BTC) |
+| sbtc-cleared | `72,488,718` |
+| sbtc-fee | `72,488` |
+| sbtc-unfilled | `7,511,282` — **rolled to cycle 4** |
+| stx-cleared | `245,665,412,477` (~245,665 STX) |
+| stx-fee | `245,665,412` (~246 STX) |
+| stx-unfilled | `0` |
+
+Contract received: **245,419,747,065 µSTX** (≈245,419.75 STX, after fee).
+
+### Cancel-swap on cycle 4 (step 13)
+
+`cancel-sbtc-deposit` on the new cycle refunds our rolled sBTC:
+- Jing → Contract: `7,511,282` sats
+- Jing position in cycle 4 drops to `u0`
+
+### Repay (step 16)
+
+| Field | Value |
+|-------|-------|
+| owed | `80,800,000` (80M × 1.01) |
+| contract sBTC at entry | `27,511,282` (20M available + 7.5M recovered) |
+| excess-sbtc | `27,511,282 − 20,000,000 = 7,511,282` |
+| shortfall | `80,800,000 − 7,511,282 = 73,288,718` |
+| refund | `0` |
+| stx-out | `245,419,747,065` |
+
+Transfers:
+- BORROWER → Contract: 73,288,718 sats (shortfall)
+- Contract → LENDER: 80,800,000 sats (full owed)
+- Contract → BORROWER: 245,419.75 STX
+
+### Final balances
+
+| Actor | sBTC Δ | STX Δ |
+|-------|--------|-------|
+| LENDER | +800,000 (1% of 80M principal) | 0 |
+| BORROWER | 85M whale − 73.29M paid = +11,711,282 | +245,419 STX |
+| Contract | +20M (unborrowed `available-sbtc`, unchanged) | 0 |
+| sBTC whale | −185,000,000 | — |
+
+### Effective borrower rate
+
+245,419 STX / 0.73288718 BTC ≈ **334,863 STX/BTC** vs clearing `338,901 STX/BTC`.
+The ~1.2% premium is the loan interest (1% flat + small rounding).
+
+### What this proves
+
+- **STX-binding rollover is handled correctly end-to-end.** Rolled sBTC sits
+  on Jing's next cycle as `get-sbtc-deposit(current-cycle, contract)` > 0,
+  which would trip `repay`'s `ERR-NOT-FULLY-RESOLVED` assertion. The
+  borrower's recovery path is `cancel-swap(1)` on the new cycle, which calls
+  Jing's `cancel-sbtc-deposit` (allowed since the new cycle is in
+  `PHASE_DEPOSIT`).
+- **`excess-sbtc` correctly discounts shortfall** by the recovered portion,
+  so borrowers only top up the "real" missing amount (cleared principal +
+  interest, minus rolled-and-recovered).
+- **`available-sbtc` is preserved across the loan lifecycle.** The 20M sats
+  lender kept in reserve (unborrowed) stays in the contract untouched,
+  confirming the accounting boundary between lender-owned and
+  borrower-collateral funds.
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
