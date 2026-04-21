@@ -719,6 +719,93 @@ loan record is the source of truth for that loan's rate — the global
 - **`set-min-sbtc-borrow` gates the next `borrow` immediately**, without
   affecting the current active loan or any queued-but-unstarted work.
 
+## Simulation 11: Refund branch in `repay` (`simul-jing-loan-refund-branch.js`)
+
+Proves that accidental sBTC airdropped to the contract while a loan is active
+is correctly refunded to BORROWER at repay time. The only path that reaches
+`refund > 0` in the contract — untouched by simulations 1-10 because in
+normal flow `excess-sbtc ≤ principal < owed` for any `interest-bps > 0`.
+
+```bash
+npx tsx simulations/simul-jing-loan-refund-branch.js
+```
+
+https://stxer.xyz/simulations/mainnet/8566b53c051ee9d6bc3cd7794c96f80c
+
+### Flow
+
+```
+fund(22M) → borrow(22M) → swap-deposit → cancel-swap
+  [contract sBTC = 22M, excess-sbtc = 22M]
+  → SBTC_WHALE airdrops 5M directly to contract
+  [contract sBTC = 27M, excess-sbtc = 27M > owed 22.22M]
+  → repay
+```
+
+### Repay transfers (step 12)
+
+Contract log: `(event "repay") (from-borrower u0) (refund u4780000) (sbtc-owed u22220000) (stx-released u0)`
+
+| Direction | Amount | Branch |
+|-----------|--------|--------|
+| Contract → BORROWER | 4,780,000 sats | **refund branch** (excess-sbtc − owed) |
+| Contract → LENDER | 22,220,000 sats | owed |
+| BORROWER → Contract | 0 | no shortfall (excess-sbtc ≥ owed) |
+
+### What this proves
+
+- **Accidental sBTC donations to the contract don't get stuck.** Any excess
+  above `owed` flows back to BORROWER at repay, so a stray `sbtc-token.transfer`
+  into the contract principal is recoverable through the loan lifecycle.
+- **No borrower out-of-pocket when surplus covers owed.** With
+  `excess-sbtc > owed`, the shortfall branch is skipped; BORROWER neither
+  tops up nor loses anything beyond what they would have paid in normal repay.
+- **Audit log correctly reports all three money movements** in a single
+  `repay` event, so downstream indexers can distinguish shortfall-repay vs
+  refund-repay scenarios.
+
+## Simulation 12: Re-borrow after SEIZE (`simul-jing-loan-reborrow-after-seize.js`)
+
+Complements Simulation 8 (serial loans via REPAID). Proves that the SEIZE
+cleanup path (`var-set active-loan none` at the end of `seize`) also enables
+a fresh `borrow` afterward — the contract doesn't lock up after a default.
+
+```bash
+npx tsx simulations/simul-jing-loan-reborrow-after-seize.js
+```
+
+https://stxer.xyz/simulations/mainnet/1897c4acd94fb4f37e9d539d53d5dc10
+
+### Flow
+
+```
+Loan 1: fund(22M) → borrow(22M) → swap-deposit → LENDER.cancel-swap → LENDER.seize
+  [loan u1 → u3 (SEIZED), active-loan → none, contract drained]
+Loan 2: LENDER.fund(15M) → BORROWER.borrow(15M) → swap-deposit → cancel-swap → repay
+  [loan u2 → u2 (REPAID)]
+```
+
+### Key transitions
+
+| After | `get-active-loan` | loan u1 status | loan u2 status | `available-sbtc` |
+|-------|-------------------|----------------|-----------------|-------------------|
+| seize(1) | `none` | `u3` (SEIZED) | — | `u0` |
+| fund(15M) | `none` | `u3` | — | `u15M` |
+| borrow(15M) | `(some u2)` | `u3` (preserved) | `u0` (PRE-SWAP) | `u0` |
+| repay(2) | `none` | `u3` | `u2` (REPAID) | `u0` |
+
+### What this proves
+
+- **`active-loan` is cleared by both `repay` and `seize`.** No asymmetry —
+  the lender can take a default and the contract is immediately usable for
+  another round.
+- **`next-loan-id` monotonically increments across seize events.** After
+  SEIZE, `borrow` still returned `(ok u2)` (not `u1` or `u3`) — the ID
+  counter is independent of loan outcome.
+- **Historical loans remain intact across the reset.** Loan u1 still shows
+  `status u3 (SEIZED)` after the second loan cycle completes, so the
+  contract maintains a full audit log regardless of outcome mix.
+
 ## Calibration note: `interest-bps` is flat, not annualized
 
 The contract stores `interest-bps` as a **flat fee on principal**, applied once
