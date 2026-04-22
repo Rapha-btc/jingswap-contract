@@ -5,7 +5,6 @@
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
 
-(define-constant DEPOSIT_MIN_BLOCKS u0)
 (define-constant CANCEL_THRESHOLD u42)
 
 (define-constant PHASE_DEPOSIT u0)
@@ -49,7 +48,6 @@
 (define-constant ERR_NOTHING_TO_SETTLE (err u1012))
 (define-constant ERR_QUEUE_FULL (err u1013))
 (define-constant ERR_CANCEL_TOO_EARLY (err u1014))
-(define-constant ERR_CLOSE_TOO_EARLY (err u1015))
 (define-constant ERR_ALREADY_CLOSED (err u1016))
 (define-constant ERR_LIMIT_REQUIRED (err u1017))
 
@@ -80,11 +78,10 @@
 
 ;; Per-call caller outcome snapshot. Populated during distribute-to-* when the
 ;; iterated depositor matches tx-sender, so settle can return the caller's fill
-;; in its response tuple and enable atomic DeFi composition.
-(define-data-var caller-usdcx-cleared uint u0)
+;; in its response tuple and enable atomic DeFi composition. `cleared` is
+;; omitted — the caller already knows its own deposit and can derive it.
 (define-data-var caller-sbtc-received uint u0)
 (define-data-var caller-usdcx-rolled uint u0)
-(define-data-var caller-sbtc-cleared uint u0)
 (define-data-var caller-usdcx-received uint u0)
 (define-data-var caller-sbtc-rolled uint u0)
 
@@ -517,7 +514,6 @@
     (totals (get-cycle-totals cycle))
   )
     (asserts! (is-eq (get-cycle-phase) PHASE_DEPOSIT) ERR_ALREADY_CLOSED)
-    (asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ERR_CLOSE_TOO_EARLY)
     (asserts! (and (>= (get total-usdcx totals) (var-get min-usdcx-deposit))
                    (>= (get total-sbtc totals) (var-get min-sbtc-deposit))) ERR_NOTHING_TO_SETTLE)
     (map filter-small-usdcx-depositor (get-usdcx-depositors cycle))
@@ -542,20 +538,16 @@
     (var-set acc-usdcx-out u0)
     (var-set acc-usdcx-rolled u0)
     (var-set acc-sbtc-rolled u0)
-    (var-set caller-usdcx-cleared u0)
     (var-set caller-sbtc-received u0)
     (var-set caller-usdcx-rolled u0)
-    (var-set caller-sbtc-cleared u0)
     (var-set caller-usdcx-received u0)
     (var-set caller-sbtc-rolled u0)
     (map distribute-to-usdcx-depositor (get-usdcx-depositors cycle))
     (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
     (try! (roll-and-sweep-dust))
     (advance-cycle)
-    (ok { usdcx-cleared: (var-get caller-usdcx-cleared),
-          sbtc-received: (var-get caller-sbtc-received),
+    (ok { sbtc-received: (var-get caller-sbtc-received),
           usdcx-rolled: (var-get caller-usdcx-rolled),
-          sbtc-cleared: (var-get caller-sbtc-cleared),
           usdcx-received: (var-get caller-usdcx-received),
           sbtc-rolled: (var-get caller-sbtc-rolled) })))
 
@@ -596,20 +588,16 @@
       (var-set acc-usdcx-out u0)
       (var-set acc-usdcx-rolled u0)
       (var-set acc-sbtc-rolled u0)
-      (var-set caller-usdcx-cleared u0)
       (var-set caller-sbtc-received u0)
       (var-set caller-usdcx-rolled u0)
-      (var-set caller-sbtc-cleared u0)
       (var-set caller-usdcx-received u0)
       (var-set caller-sbtc-rolled u0)
       (map distribute-to-usdcx-depositor (get-usdcx-depositors cycle))
       (map distribute-to-sbtc-depositor (get-sbtc-depositors cycle))
       (try! (roll-and-sweep-dust))
       (advance-cycle)
-      (ok { usdcx-cleared: (var-get caller-usdcx-cleared),
-            sbtc-received: (var-get caller-sbtc-received),
+      (ok { sbtc-received: (var-get caller-sbtc-received),
             usdcx-rolled: (var-get caller-usdcx-rolled),
-            sbtc-cleared: (var-get caller-sbtc-cleared),
             usdcx-received: (var-get caller-usdcx-received),
             sbtc-rolled: (var-get caller-sbtc-rolled) }))))
 
@@ -741,7 +729,6 @@
     (var-set acc-usdcx-rolled (+ (var-get acc-usdcx-rolled) my-usdcx-unfilled))
     (if (is-eq depositor tx-sender)
       (begin
-        (var-set caller-usdcx-cleared my-usdcx-cleared)
         (var-set caller-sbtc-received my-sbtc-received)
         (var-set caller-usdcx-rolled my-usdcx-unfilled)
         true)
@@ -781,7 +768,6 @@
     (var-set acc-sbtc-rolled (+ (var-get acc-sbtc-rolled) my-sbtc-unfilled))
     (if (is-eq depositor tx-sender)
       (begin
-        (var-set caller-sbtc-cleared my-sbtc-cleared)
         (var-set caller-usdcx-received my-usdcx-received)
         (var-set caller-sbtc-rolled my-sbtc-unfilled)
         true)

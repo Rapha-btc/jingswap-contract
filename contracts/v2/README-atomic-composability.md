@@ -4,16 +4,19 @@
 
 Two coupled changes in `sbtc-usdcx-v2.clar`:
 
-1. **`DEPOSIT_MIN_BLOCKS` lowered from `u10` to `u0`.** A cycle can now be
-   closed the same block it opened, as long as both sides meet their
-   minimum deposit.
+1. **The deposit-phase time buffer was removed entirely.** The
+   `DEPOSIT_MIN_BLOCKS` constant, the `ERR_CLOSE_TOO_EARLY` error, and
+   the `(asserts! (>= elapsed DEPOSIT_MIN_BLOCKS) ...)` gate in
+   `close-deposits` are all gone. A cycle can now be closed in the same
+   block it opened, as long as both sides meet their minimum deposit.
 2. **`settle`, `settle-with-refresh`, and `close-and-settle-with-refresh`
    return the caller's fill** — a tuple of
-   `{ usdcx-cleared, sbtc-received, usdcx-rolled, sbtc-cleared, usdcx-received, sbtc-rolled }` —
-   instead of `(ok true)`. The numbers are collected via six
-   `caller-*` data-vars that get set inside `distribute-to-*-depositor`
-   whenever the iterated depositor matches `tx-sender`, and reset at the
-   top of each settle call.
+   `{ sbtc-received, usdcx-rolled, usdcx-received, sbtc-rolled }` —
+   instead of `(ok true)`. `cleared` is omitted because the caller
+   already knows its own deposit and can derive it. The numbers are
+   collected via four `caller-*` data-vars that get set inside
+   `distribute-to-*-depositor` whenever the iterated depositor matches
+   `tx-sender`, and reset at the top of each settle call.
 
 ## Why the buffer went to zero
 
@@ -64,23 +67,20 @@ composable. Another contract can now:
 
 ```clarity
 (let ((result (try! (contract-call? .sbtc-usdcx-v2 settle-with-refresh ...))))
-  ;; result is { usdcx-cleared, sbtc-received, usdcx-rolled,
-  ;;             sbtc-cleared, usdcx-received, sbtc-rolled }
+  ;; result is { sbtc-received, usdcx-rolled, usdcx-received, sbtc-rolled }
   ;; chain into the next leg: swap, repay, re-deposit, etc.
   ...)
 ```
 
-The six `caller-*` data-vars are a buffer: each `distribute-to-*` pass
+The four `caller-*` data-vars are a buffer: each `distribute-to-*` pass
 writes the matching depositor's numbers into them, and settle reads
 them out at the end. They are reset to zero on every settle so a
 non-participating caller sees all zeros, and they work correctly for a
 caller who deposited on **both** sides (the two distribute fns populate
-their respective trio independently).
+their respective pair independently).
 
 ## Non-changes worth noting
 
-- The `DEPOSIT_MIN_BLOCKS` constant is still there — raising it later is
-  a one-line change if product requirements shift.
 - `CANCEL_THRESHOLD u42` (the stuck-cycle recovery window for
   `cancel-cycle`) is unchanged. That's a separate concern from the
   batch-open window.
