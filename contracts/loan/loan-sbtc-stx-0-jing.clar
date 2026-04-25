@@ -4,7 +4,7 @@
 ;; Funded just-in-time by a lender reserve contract (loan-reserve.clar).
 ;;
 ;; Immutable BORROWER and RESERVE (the lender's pool). One active loan
-;; at a time. N singles run in parallel, each as its own Jing depositor
+;; at a time. N snpls run in parallel, each as its own Jing depositor
 ;; principal, with no cross-contamination at Jing's per-principal layer.
 ;;
 ;; Flow:

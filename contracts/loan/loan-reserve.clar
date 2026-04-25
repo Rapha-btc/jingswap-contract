@@ -62,12 +62,21 @@
     (print { event: "supply", amount: amount })
     (ok true)))
 
-(define-public (withdraw (amount uint))
+;; Permissionless: funds always flow to LENDER, no theft vector.
+(define-public (withdraw-sbtc (amount uint))
   (begin
-    (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? SBTC transfer amount current-contract LENDER none))))
-    (print { event: "withdraw", amount: amount })
+    (print { event: "withdraw-sbtc", amount: amount })
+    (ok true)))
+
+;; Sweeps STX accumulated from seized snpl loans back to the lender.
+;; Permissionless: funds always flow to LENDER.
+(define-public (withdraw-stx (amount uint))
+  (begin
+    (try! (as-contract? ((with-stx amount))
+      (try! (stx-transfer? amount current-contract LENDER))))
+    (print { event: "withdraw-stx", amount: amount })
     (ok true)))
 
 ;; ---------- Credit lines (lender-gated) ----------
@@ -134,8 +143,8 @@
 
 ;; Called by a snpl with an open credit line during its `borrow`.
 ;; Pushes sBTC to the snpl, bumps outstanding, enforces global min
-;; draw, credit limit, and liquidity. Returns the line's interest-bps
-;; so the snpl can stamp it onto the loan record.
+;; draw and credit cap. Returns the line's interest-bps so the snpl
+;; can stamp it onto the loan record.
 (define-public (draw (amount uint))
   (let ((caller contract-caller)
         (line (unwrap! (map-get? credit-lines caller) ERR-NO-CREDIT-LINE))
