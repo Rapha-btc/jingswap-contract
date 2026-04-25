@@ -1,50 +1,56 @@
 ;; loan-reserve
 ;;
-;; Pooled sBTC funding layer for per-borrower loan singles.
+;; Pooled sBTC funding layer for per-borrower swap-now-pay-later
+;; (snpl) loan contracts.
 ;;
-;; Lender supplies sBTC, approves individual deployed singles with a
-;; borrower principal and a credit limit. Approved singles pull capital
-;; at `borrow` time via `disburse`, and notify the reserve of returning
-;; principal at `repay` / `seize` / `cancel` via `notify-return`.
+;; Lender supplies sBTC, then opens a credit line for each deployed
+;; snpl with a borrower principal, a credit cap, and an interest
+;; rate (bps). Snpls draw against their line at `borrow` via
+;; `draw`, and notify the reserve of returning principal at
+;; `repay` / `seize` via `notify-return`.
 ;;
-;; No Jing awareness. All auction logic lives in the singles.
+;; The reserve also enforces a global minimum draw (`min-sbtc-draw`),
+;; tunable by the lender, applied uniformly across all snpls.
 ;;
-;; Trust model: the bytecode of an approved single must be verified by
-;; the lender before calling `approve-single`. The reserve trusts any
-;; approved single to call `disburse` / `notify-return` correctly.
+;; No Jing awareness. All auction logic lives in the snpls.
+;;
+;; Trust model: the bytecode of a snpl must be verified by the
+;; lender before calling `open-credit-line`. The reserve trusts any
+;; snpl with an open line to call `draw` / `notify-return`
+;; correctly.
 
 (define-constant SBTC 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 ;; Lender EOA. REPLACE BEFORE DEPLOYMENT.
 (define-constant LENDER 'SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M)
 
 (define-constant ERR-NOT-LENDER (err u200))
-(define-constant ERR-NOT-APPROVED-SINGLE (err u201))
+(define-constant ERR-NO-CREDIT-LINE (err u201))
 (define-constant ERR-OVER-LIMIT (err u202))
-(define-constant ERR-INSUFFICIENT-LIQUIDITY (err u203))
 (define-constant ERR-INVALID-AMOUNT (err u204))
-(define-constant ERR-ALREADY-APPROVED (err u205))
-(define-constant ERR-APPROVAL-NOT-FOUND (err u206))
+(define-constant ERR-LINE-EXISTS (err u205))
+(define-constant ERR-LINE-NOT-FOUND (err u206))
 (define-constant ERR-OUTSTANDING-NONZERO (err u207))
 (define-constant ERR-UNDERFLOW (err u208))
 (define-constant ERR-PAUSED (err u209))
 
 (define-data-var paused bool false)
+(define-data-var min-sbtc-draw uint u1000000) ;; 0.01 sBTC, applied across all snpls
 
-(define-map approvals principal {
+(define-map credit-lines principal {
   borrower: principal,
-  limit: uint,
-  outstanding: uint
+  cap-sbtc: uint,
+  interest-bps: uint,
+  outstanding-sbtc: uint
 })
 
 ;; ---------- Read-only ----------
 
 (define-read-only (get-lender) LENDER)
 (define-read-only (is-paused) (var-get paused))
-(define-read-only (get-approval (single principal)) (map-get? approvals single))
-(define-read-only (is-approved-single (single principal))
-  (is-some (map-get? approvals single)))
-(define-private (get-sbtc-balance)
-  (unwrap-panic (contract-call? SBTC get-balance current-contract)))
+(define-read-only (get-min-sbtc-draw) (var-get min-sbtc-draw))
+(define-read-only (get-credit-line (snpl principal)) (map-get? credit-lines snpl))
+(define-read-only (has-credit-line (snpl principal))
+  (is-some (map-get? credit-lines snpl)))
 
 ;; ---------- Lender supply / withdraw ----------
 
@@ -57,38 +63,55 @@
     (ok true)))
 
 (define-public (withdraw (amount uint))
-  (let ((bal (get-sbtc-balance)))
+  (begin
     (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (asserts! (<= amount bal) ERR-INSUFFICIENT-LIQUIDITY)
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? SBTC transfer amount current-contract LENDER none))))
     (print { event: "withdraw", amount: amount })
     (ok true)))
 
-;; ---------- Approvals (lender-gated) ----------
+;; ---------- Credit lines (lender-gated) ----------
 
-(define-public (approve-single (single principal) (borrower principal) (limit uint))
+(define-public (open-credit-line (snpl principal) (borrower principal) (cap-sbtc uint) (interest-bps uint))
   (begin
     (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (asserts! (is-none (map-get? approvals single)) ERR-ALREADY-APPROVED)
-    (map-set approvals single { borrower: borrower, limit: limit, outstanding: u0 })
-    (print { event: "approve-single", single: single, borrower: borrower, limit: limit })
+    (asserts! (is-none (map-get? credit-lines snpl)) ERR-LINE-EXISTS)
+    (map-set credit-lines snpl {
+      borrower: borrower,
+      cap-sbtc: cap-sbtc,
+      interest-bps: interest-bps,
+      outstanding-sbtc: u0
+    })
+    (print { event: "open-credit-line", 
+             snpl: snpl, 
+             borrower: borrower,
+             cap-sbtc: cap-sbtc, 
+             interest-bps: interest-bps })
     (ok true)))
 
-(define-public (set-limit (single principal) (new-limit uint))
-  (let ((app (unwrap! (map-get? approvals single) ERR-APPROVAL-NOT-FOUND)))
+(define-public (set-credit-line-cap (snpl principal) (new-cap uint))
+  (let ((line (unwrap! (map-get? credit-lines snpl) ERR-LINE-NOT-FOUND)))
     (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (map-set approvals single (merge app { limit: new-limit }))
-    (print { event: "set-limit", single: single, limit: new-limit })
+    (map-set credit-lines snpl (merge line { cap-sbtc: new-cap }))
+    (print { event: "set-credit-line-cap", snpl: snpl, cap-sbtc: new-cap })
     (ok true)))
 
-;; Only callable when outstanding is zero (no in-flight loans on this single).
-(define-public (revoke-approval (single principal))
-  (let ((app (unwrap! (map-get? approvals single) ERR-APPROVAL-NOT-FOUND)))
+;; Adjusts the rate for future loans on this line. Existing loans keep
+;; the rate that was stamped on them at `borrow` time.
+(define-public (set-credit-line-interest (snpl principal) (new-bps uint))
+  (let ((line (unwrap! (map-get? credit-lines snpl) ERR-LINE-NOT-FOUND)))
     (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (asserts! (is-eq (get outstanding app) u0) ERR-OUTSTANDING-NONZERO)
-    (map-delete approvals single)
-    (print { event: "revoke-approval", single: single })
+    (map-set credit-lines snpl (merge line { interest-bps: new-bps }))
+    (print { event: "set-credit-line-interest", snpl: snpl, interest-bps: new-bps })
+    (ok true)))
+
+;; Only callable when outstanding is zero (no in-flight loans on this snpl).
+(define-public (close-credit-line (snpl principal))
+  (let ((line (unwrap! (map-get? credit-lines snpl) ERR-LINE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
+    (asserts! (is-eq (get outstanding-sbtc line) u0) ERR-OUTSTANDING-NONZERO)
+    (map-delete credit-lines snpl)
+    (print { event: "close-credit-line", snpl: snpl })
     (ok true)))
 
 (define-public (set-paused (new-paused bool))
@@ -98,41 +121,52 @@
     (print { event: "set-paused", paused: new-paused })
     (ok true)))
 
-;; ---------- Disburse / notify-return (single-gated) ----------
-
-;; Called by an approved single during its `borrow`. Pushes sBTC to the
-;; single, bumps outstanding, enforces credit limit and liquidity.
-(define-public (disburse (amount uint))
-  (let ((caller contract-caller)
-        (app (unwrap! (map-get? approvals caller) ERR-NOT-APPROVED-SINGLE))
-        (current (get outstanding app))
-        (limit (get limit app))
-        (bal (get-sbtc-balance)))
-    (asserts! (not (var-get paused)) ERR-PAUSED)
+;; Sets the global minimum draw across all snpls. Lender only.
+(define-public (set-min-sbtc-draw (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
-    (asserts! (<= (+ current amount) limit) ERR-OVER-LIMIT)
-    (asserts! (<= amount bal) ERR-INSUFFICIENT-LIQUIDITY)
-    (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
-      (try! (contract-call? SBTC transfer amount current-contract caller none))))
-    (map-set approvals caller (merge app { outstanding: (+ current amount) }))
-    (print { event: "disburse", single: caller, amount: amount,
-             new-outstanding: (+ current amount) })
+    (var-set min-sbtc-draw amount)
+    (print { event: "set-min-sbtc-draw", amount: amount })
     (ok true)))
 
-;; Called by an approved single at `repay` / `seize` / `cancel` to
-;; release principal against outstanding. The single's bytecode must
-;; have been approved by the lender; the reserve trusts the reported
-;; amount.
-(define-public (notify-return (principal-returned uint))
+;; ---------- Draw / notify-return (snpl-gated) ----------
+
+;; Called by a snpl with an open credit line during its `borrow`.
+;; Pushes sBTC to the snpl, bumps outstanding, enforces global min
+;; draw, credit limit, and liquidity. Returns the line's interest-bps
+;; so the snpl can stamp it onto the loan record.
+(define-public (draw (amount uint))
   (let ((caller contract-caller)
-        (app (unwrap! (map-get? approvals caller) ERR-NOT-APPROVED-SINGLE))
-        (current (get outstanding app)))
-    (asserts! (<= principal-returned current) ERR-UNDERFLOW)
-    (map-set approvals caller (merge app {
-      outstanding: (- current principal-returned)
+        (line (unwrap! (map-get? credit-lines caller) ERR-NO-CREDIT-LINE))
+        (current (get outstanding-sbtc line))
+        (cap (get cap-sbtc line))
+        (new-outstanding (+ current amount)))
+    (asserts! (not (var-get paused)) ERR-PAUSED)
+    (asserts! (>= amount (var-get min-sbtc-draw)) ERR-INVALID-AMOUNT)
+    (asserts! (<= new-outstanding cap) ERR-OVER-LIMIT)
+    (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
+      (try! (contract-call? SBTC transfer amount current-contract caller none))))
+    (map-set credit-lines caller (merge line { outstanding-sbtc: new-outstanding }))
+    (print { event: "draw", 
+             snpl: caller, 
+             amount: amount,
+             new-outstanding-sbtc: new-outstanding })
+    (ok (get interest-bps line))))
+
+;; Called by a snpl at `repay` / `seize` to release principal against
+;; outstanding. The snpl's bytecode must have been approved by the
+;; lender; the reserve trusts the reported amount.
+(define-public (notify-return (notional uint))
+  (let ((caller contract-caller)
+        (line (unwrap! (map-get? credit-lines caller) ERR-NO-CREDIT-LINE))
+        (current (get outstanding-sbtc line)))
+    (asserts! (<= notional current) ERR-UNDERFLOW)
+    (map-set credit-lines caller (merge line {
+      outstanding-sbtc: (- current notional)
     }))
     (print { event: "notify-return",
-             single: caller,
-             amount: principal-returned,
-             new-outstanding: (- current principal-returned) })
+             snpl: caller,
+             amount: notional,
+             new-outstanding-sbtc: (- current notional) })
     (ok true)))
