@@ -423,31 +423,118 @@ LENDER_B.withdraw-sbtc(22.198M) on reserve-b
 
 ---
 
+## Sim 7: Rollover — back-to-back repays (`simul-loan-snpl-rollover.js`)
+
+State-machine continuity demo: borrower runs the full happy path twice
+in a row on a single snpl + reserve, no `set-reserve` in between. Tests
+that `active-loan` releases on repay, `next-loan-id` increments, the
+credit line cycles outstanding-sbtc back to zero ready for the next
+draw, and the lender accumulates 198k sats per loan.
+
+```bash
+npx tsx simulations/simul-loan-snpl-rollover.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/483c8ceed2515e3c05f2227d2137d2fa
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 17 | After loan u1 repay: `(get-active-loan)` = `none` ← released by repay |
+| 19 | A.outstanding back to `u0` |
+| 20 | Reserve sBTC `u22198000` (lender-payoff from loan 1) |
+| 21 | Loan u2 borrow: **`(ok u2)`** ← `next-loan-id` incremented past u1 |
+| 23 | Loan u2 record at status `u0` OPEN, with fresh deadline + zeroed jing-cycle/limit-price |
+| 24 | Loan u1 record STILL status `u1` REPAID — prior loan preserved |
+| 26 | Reserve sBTC drops to `u198000` (= 22.198M − 22M loan-2 draw) |
+| 29 | Loan u2 repay print: same `fee-sbtc u22000`, `lender-payoff-sbtc u22198000`, `stx-released u0` |
+| 33 | Final reserve sBTC: **`u22396000`** = 198k + 22.198M lender-payoff |
+| 34 | JING_TREASURY: `u345885 → u389885` = **exactly +44k** (22k × 2) |
+| 37 | LENDER end: **`u23396000`** (= 23M seed − 22M supply + 22.396M withdraw → **+396k net = 198k × 2**) |
+
+---
+
+## Sim 8: Reborrow after seize (`simul-loan-snpl-reborrow-after-seize.js`)
+
+Companion to Sim 7 but with default in the middle: borrow → seize →
+borrow again on the *same credit line*. Proves that `seize` releases
+`active-loan` exactly like `repay` does (via `notify-return`), that
+`close-credit-line` is *not* automatically triggered by default, and
+that the lender can keep the line open indefinitely after a default
+without any state cleanup. Loan u1's record is preserved on-chain
+(status `u2` SEIZED) as historical evidence even after loan u2 opens.
+
+```bash
+npx tsx simulations/simul-loan-snpl-reborrow-after-seize.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/619de540d9f9f56e9360ed6e18753323
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 15 | Seize: `sbtc-seized u22000000, stx-seized u0`, `notify-return(22M)`, no FT_TRANSFER to JING_TREASURY |
+| 16 | After seize: `(get-active-loan)` = `none` ← released by seize, just like repay |
+| 17 | Loan u1 stamped status `u2` SEIZED |
+| 18 | Reserve credit-line: `outstanding-sbtc u0` ← `notify-return` cleared it |
+| 20 | Reserve sBTC: `u22000000` (recovered principal exactly — no interest, since seize collects only what the snpl held) |
+| 21 | JING_TREASURY: `u345885` ← UNCHANGED post-seize ← **no-fee-on-seize invariant** |
+| 22 | Loan u2 borrow: **`(ok u2)`** on the *same credit line*, no `close-credit-line` ever called |
+| 25 | **Loan u1 record STILL status `u2` SEIZED** — prior default preserved as on-chain history |
+| 29 | Loan u2 repay: 3 transfers as usual, `fee-sbtc u22000`, `lender-payoff-sbtc u22198000` |
+| 33 | Final reserve sBTC: **`u22198000`** (= 22M post-seize − 22M loan-2 draw + 22.198M loan-2 repay) |
+| 34 | JING_TREASURY: `u345885 → u367885` = **exactly +22k** (only loan 2 paid the fee — loan 1 was seized) |
+| 37 | LENDER end: **`u23198000`** (= +198k net, only loan 2 had interest; seize gave back exactly principal) |
+
+### Why this matters
+
+The credit line is *passive on-chain state*: it persists across loan
+boundaries until the lender explicitly calls `close-credit-line` (which
+itself requires `outstanding-sbtc u0` as a guard). After a default, the
+lender's choices are:
+1. Keep the line open and let the borrower retry (this sim) — useful
+   if the lender judges the default to be one-off.
+2. Call `close-credit-line` to retire the line (not exercised in any
+   sim — pure state mutation, clarinet-suitable).
+3. Lower the cap via `set-credit-line-cap` to a smaller drawable amount
+   while keeping the line open (clarinet-suitable).
+
+Sim 8 confirms option 1 works end-to-end with no manual state cleanup.
+
+---
+
 ## Coverage matrix
 
-| Branch | sim | snpls | reserves | settlement | binding side | rolled sBTC | stx-released to borrower | cancel-swap caller | protocol fee paid |
-|---|---|---|---|---|---|---|---|---|---|
-| `repay` (synthetic) | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | borrower | yes (22k sats) |
-| `repay` (real Jing) | 2 | 1 | 1 | close-and-settle | sBTC | 0 | u74227883093 ✓ | borrower (defensive) | yes (22k sats) |
-| `seize` after full clear | 3 | 1 | 1 | close-and-settle | sBTC | 0 | n/a | borrower (defensive) | no |
-| `seize` after partial clear | 4 | 1 | 1 | close-and-settle | STX | 59.9M sats | n/a | borrower | no |
-| Multi-snpl repay + seize | 5 | 2 | 1 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower (A) **+ lender (B)** | yes on A only |
-| Set-reserve between loans | 6 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
+| Branch | sim | snpls | reserves | loans | settlement | binding side | rolled sBTC | stx-released to borrower | cancel-swap caller | protocol fee paid |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `repay` (synthetic) | 1 | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | borrower | yes (22k sats) |
+| `repay` (real Jing) | 2 | 1 | 1 | 1 | close-and-settle | sBTC | 0 | u74227883093 ✓ | borrower (defensive) | yes (22k sats) |
+| `seize` after full clear | 3 | 1 | 1 | 1 | close-and-settle | sBTC | 0 | n/a | borrower (defensive) | no |
+| `seize` after partial clear | 4 | 1 | 1 | 1 | close-and-settle | STX | 59.9M sats | n/a | borrower | no |
+| Multi-snpl repay + seize | 5 | 2 | 1 | 2 (1 ea) | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower (A) **+ lender (B)** | yes on A only |
+| Set-reserve between loans | 6 | 1 | 2 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
+| Rollover (repay → repay) | 7 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
+| Reborrow after seize | 8 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on loan 2 only (22k) |
 
-Open seize state-space:
+## Stxer coverage exhausted — moving to Clarinet
 
-- `seize` past deadline with **no Jing settlement at all** (snpl never deposited, or cancel-swap was used pre-settle): produces clean STX=0 / sBTC=notional reserve receipt. Trivial extension of Sim 1 by skipping repay and calling seize instead.
-- `seize` with **STX-only seize proceeds** (no leftover sBTC): subset of Sim 2.
-- `seize` with **both legs nonzero** at the seize call: Sim 3 is the canonical case.
+The eight sims above cover every branch that depends on real mainnet
+Jing/Pyth/sBTC interaction, multi-actor concurrency, or canonical
+bytecode demonstrations. The remaining branches don't depend on any of
+that — they're pure state-machine paths that clarinet can validate at
+much lower cost (and with block-advance support that stxer's
+single-block fork model can't provide).
 
-## Open follow-ups for full lifecycle coverage
+**Migrating to clarinet** for:
 
-Not yet ported from the old single-contract PoC suite:
-
-- `simul-loan-snpl-rollover.js` — borrow → repay → borrow again on the same snpl
-- `simul-loan-snpl-reborrow-after-seize.js` — borrow → seize → reopen credit line → borrow again
-- `simul-loan-snpl-set-swap-limit.js` — exercise `set-swap-limit` relay to Jing
-- `simul-loan-snpl-set-reserve.js` — borrower swaps reserves between loans (active-loan gate)
-- `simul-loan-snpl-errors.js` — bundle of revert paths: `ERR-WRONG-RESERVE`, `ERR-INTEREST-MISMATCH`, `ERR-OVER-LIMIT`, `ERR-NOT-LENDER`/`-BORROWER`, `ERR-PAUSED`, `ERR-ALREADY-INIT`, `ERR-BORROWER-MISMATCH`, `ERR-NOT-DEPLOYER`
-- `simul-loan-snpl-admin.js` — `set-credit-line-cap`, `set-credit-line-interest`, `set-min-sbtc-draw`, `set-paused`, `close-credit-line`
-- Multi-snpl on one reserve — canonical-bytecode value prop
+- **Errors bundle**: `ERR-NOT-LENDER`, `ERR-NOT-BORROWER`, `ERR-NOT-DEPLOYER`, `ERR-ALREADY-INIT`, `ERR-PAUSED`, `ERR-OVER-LIMIT`, `ERR-INVALID-AMOUNT`, `ERR-LINE-EXISTS`, `ERR-LINE-NOT-FOUND`, `ERR-OUTSTANDING-NONZERO`, `ERR-UNDERFLOW`, `ERR-BORROWER-MISMATCH`, `ERR-INTEREST-MISMATCH`, `ERR-NO-CREDIT-LINE`, `ERR-LOAN-NOT-FOUND`, `ERR-BAD-STATUS`. `ERR-WRONG-RESERVE` (u113) and `ERR-ACTIVE-LOAN-EXISTS` (u104) already exercised in Sim 6.
+- **Admin setters**: `set-credit-line-cap`, `set-credit-line-interest`, `set-min-sbtc-draw`, `set-paused` + draw-while-paused, `close-credit-line` happy path + ERR-OUTSTANDING-NONZERO guard.
+- **SAINT sentinel guards**: pre-init reverts on every gated function.
+- **Slippage protection**: `set-credit-line-interest` + stale `expected-bps` in `borrow` → ERR-INTEREST-MISMATCH.
+- **Cap / min-draw enforcement**: borrow > cap → ERR-OVER-LIMIT; borrow < min → ERR-INVALID-AMOUNT.
+- **Block-advance dependent (stxer can't do these at all)**:
+  - `swap-deposit` / `set-swap-limit` past deadline → `ERR-PAST-DEADLINE`. The stxer copy comments out these guards because the single-block fork puts deadline = current burn-block-height; clarinet can advance past deadline and prove the production gate fires.
+  - `seize` before deadline → `ERR-DEADLINE-NOT-REACHED`. Same reason — production has `CLAWBACK-DELAY u4200` (~29 days); clarinet can run mock-block-advance to test partial elapse.
+  - `cancel-swap` borrower-only-pre-deadline branch (the OR's left side enforced standalone). Sim 5 hit the lender-post-deadline branch.
