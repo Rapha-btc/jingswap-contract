@@ -59,6 +59,12 @@
 (define-constant CLAWBACK-DELAY u0)
 (define-constant BPS_PRECISION u10000)
 
+;; Protocol fee: 10% of accrued interest is routed to the Jing treasury at
+;; repay. No fee on seize. Hardcoded so canonical-bytecode snpls cannot
+;; bypass the carve-out by setting a runtime var.
+(define-constant JING-TREASURY 'SMH8FRN30ERW1SX26NJTJCKTDR3H27NRJ6W75WQE)
+(define-constant FEE-BPS-OF-INTEREST u1000)
+
 (define-constant STATUS-OPEN u0)
 (define-constant STATUS-REPAID u1)
 (define-constant STATUS-SEIZED u2)
@@ -182,7 +188,7 @@
         (amount (get notional-sbtc loan)))
     (asserts! (is-eq tx-sender (var-get borrower)) ERR-NOT-BORROWER)
     (asserts! (is-eq (get status loan) STATUS-OPEN) ERR-BAD-STATUS)
-    (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE)
+    ;; (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE) // stxer cannot simulate blocks advance
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? JING-MARKET deposit-sbtc amount limit-price))))
     (map-set loans loan-id (merge loan {
@@ -226,6 +232,11 @@
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
         (notional (get notional-sbtc loan))
         (payoff (get payoff-sbtc loan))
+        (interest (- payoff notional))
+        ;; 10% of interest to Jing; rest to reserve. Total snpl outflow
+        ;; remains `payoff`, just split across two destinations.
+        (fee (/ (* interest FEE-BPS-OF-INTEREST) BPS_PRECISION))
+        (lender-payoff (- payoff fee))
         (stx-out (stx-get-balance current-contract))
         ;; No prefunded lender capital in v2, so any sBTC on-contract is
         ;; borrower-side recovery (Jing eviction, cancel-swap, airdrop).
@@ -251,9 +262,14 @@
         (try! (as-contract? ((with-ft SBTC "sbtc-token" delta))
           (try! (contract-call? SBTC transfer delta current-contract borrower-addr none))))
         true))
-    ;; Pay payoff (principal + interest) to reserve
-    (try! (as-contract? ((with-ft SBTC "sbtc-token" payoff))
-      (try! (contract-call? SBTC transfer payoff current-contract reserve-addr none))))
+    ;; Protocol fee -> Jing treasury (skip on zero/sub-dust interest)
+    (if (> fee u0)
+      (try! (as-contract? ((with-ft SBTC "sbtc-token" fee))
+        (try! (contract-call? SBTC transfer fee current-contract JING-TREASURY none))))
+      true)
+    ;; Lender's share (payoff - fee) -> reserve
+    (try! (as-contract? ((with-ft SBTC "sbtc-token" lender-payoff))
+      (try! (contract-call? SBTC transfer lender-payoff current-contract reserve-addr none))))
     ;; Position STX to borrower
     (if (> stx-out u0)
       (try! (as-contract? ((with-stx stx-out))
@@ -262,11 +278,13 @@
     (try! (contract-call? reserve notify-return notional))
     (map-set loans loan-id (merge loan { position-stx: stx-out, status: STATUS-REPAID }))
     (var-set active-loan none)
-    (print { event: "repay", 
-             loan-id: loan-id, 
+    (print { event: "repay",
+             loan-id: loan-id,
              payoff-sbtc: payoff,
-             delta-sbtc: delta, 
-             is-shortfall: is-shortfall, 
+             lender-payoff-sbtc: lender-payoff,
+             fee-sbtc: fee,
+             delta-sbtc: delta,
+             is-shortfall: is-shortfall,
              stx-released: stx-out,
              snpl: current-contract,
              reserve: reserve-addr })

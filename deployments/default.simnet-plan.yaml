@@ -226,6 +226,16 @@ plan:
       path: contracts/jing-loan-sbtc-stx-single.clar
       clarity-version: 5
     - transaction-type: emulated-contract-publish
+      contract-name: reserve-trait
+      emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      path: contracts/loan/reserve-trait.clar
+      clarity-version: 5
+    - transaction-type: emulated-contract-publish
+      contract-name: snpl-trait
+      emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+      path: contracts/loan/snpl-trait.clar
+      clarity-version: 5
+    - transaction-type: emulated-contract-publish
       contract-name: loan-reserve
       emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
       path: contracts/loan/loan-reserve.clar
