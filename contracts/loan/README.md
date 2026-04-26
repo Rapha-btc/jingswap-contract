@@ -1,77 +1,67 @@
 # Jing Loan Reserve + SNPL System
 
 Two-contract setup for swap-now-pay-later (snpl) loans that draw against
-a pooled sBTC reserve and execute on Jing v2 auctions.
+a pooled sBTC reserve and execute on Jing v2 auctions. Both contracts
+have canonical bytecode: the lender (on the reserve), borrower (on the
+snpl), and configured reserve (on the snpl) are all runtime-set via
+data-vars rather than baked into source. Same source code → same hash
+across all deployments.
 
 ## Contracts
 
-- `loan-reserve.clar` — pooled sBTC funding layer, holds credit lines
-  per snpl with cap-sbtc, interest-bps, outstanding-sbtc.
+- `reserve-trait.clar` — minimal interface (`draw`, `notify-return`)
+  that any reserve must implement.
+- `snpl-trait.clar` — interface (`get-borrower`, `get-reserve`,
+  `borrow`, `repay`, `seize`, plus loan views) used by the reserve at
+  credit-line opening to verify configuration, and by external
+  consumers to interact with any snpl.
+- `loan-reserve.clar` — pooled sBTC funding layer. Holds credit lines
+  per snpl with `cap-sbtc`, `interest-bps`, `outstanding-sbtc`. Lender
+  is set once at deploy via `initialize`.
 - `loan-sbtc-stx-0-jing.clar` — per-borrower snpl specialized for
-  `sbtc-stx-0-jing-v2`. Draws once from reserve, swap-deposits on Jing,
-  repays or gets seized after deadline.
-- `snpl-trait.clar` — minimal interface (`get-borrower`) used by the
-  reserve at credit-line opening to verify the snpl's configured
-  borrower matches the principal the lender intended.
+  `sbtc-stx-0-jing-v2`. Borrower and configured reserve are set once
+  at deploy via `initialize`; thereafter the borrower can swap
+  reserves between loans via `set-reserve`.
+
+## Lifecycle
+
+1. Deploy `reserve-trait`, `snpl-trait`, `loan-reserve`, and one or
+   more snpls.
+2. Reserve deployer calls `loan-reserve.initialize(lender)` once.
+3. Snpl deployer calls `snpl.initialize(borrower, reserve)` once.
+4. Lender supplies sBTC: `loan-reserve.supply(amount)`.
+5. Lender opens a credit line:
+   `loan-reserve.open-credit-line(snpl, borrower, cap, interest-bps)`.
+   The reserve calls `snpl.get-borrower` to verify the borrower
+   principal matches what the lender intended.
+6. Borrower draws: `snpl.borrow(amount, expected-bps, reserve-trait)`.
+7. Borrower swaps on Jing: `snpl.swap-deposit(loan-id, limit-price)`.
+   Can `cancel-swap` and redeposit until deadline.
+8. After Jing fully resolves, borrower closes:
+   `snpl.repay(loan-id, reserve-trait)`. Or, after deadline, anyone
+   calls `snpl.seize(loan-id, reserve-trait)`.
+9. Lender withdraws supplied capital or seize-proceeds:
+   `loan-reserve.withdraw-sbtc(amount)` /
+   `loan-reserve.withdraw-stx(amount)`.
+10. Between loans, borrower can swap reserves:
+    `snpl.set-reserve(new-reserve-trait)`. Blocked while a loan is
+    active so the borrower can't redirect payoff away from the
+    funding reserve.
+
+## Canonical bytecode
+
+Neither contract contains a hardcoded mainnet principal beyond the
+SBTC token contract address. The `LENDER`, `BORROWER`, and `RESERVE`
+of the original PoC have all been replaced with data-vars defaulting
+to `SAINT` (`'SP000000000000000000002Q6VF78`), set at deploy time via
+`initialize`. This means a registry of approved snpl/reserve
+implementations only needs to track one source-hash per contract type.
 
 ## Post-POC follow-ups
 
-These were considered during the POC build but deferred to keep the
-first version simple. Track them as upgrades for v2.
+### Loan record shape locked into the trait
 
-### 1. `BORROWER` as a one-time-settable var (instead of a constant)
-
-**Today:** every snpl deployment hardcodes `BORROWER` as a constant, so
-the bytecode hash differs per borrower. The lender must verify each
-deployment's hash separately before opening a credit line.
-
-**Proposed:** make `borrower` a `(define-data-var ... (optional principal) none)`,
-captured `(define-constant DEPLOYER tx-sender)`, and add a one-time
-`set-borrower` callable only by the DEPLOYER (errors if already set).
-Source code becomes canonical across deployments — the lender verifies
-**one** snpl source hash, and every snpl deployed from it is interchangeable
-at the bytecode level. The trait check at `open-credit-line` already
-verifies the post-init borrower matches what the lender intended.
-
-Lifecycle: deploy snpl → deployer calls `set-borrower(P)` → lender opens
-credit line for `P` (asserts via `get-borrower`).
-
-Net win: lender audit goes from O(N) deployments to O(1) source.
-
-### 2. `RESERVE` as a var (instead of a constant) → multi-reserve snpls
-
-**Today:** `(define-constant RESERVE .loan-reserve)` ties each snpl to one
-specific reserve at compile time. To swap reserves, deploy a new snpl.
-
-**Proposed:** make `reserve` a `(define-data-var ... (optional principal) none)`
-(or a list of approved reserves), settable by the DEPLOYER post-deploy
-or by some governance path. Combined with #1, snpls become fully
-generic: same bytecode, same source, parameterized at runtime for
-borrower + reserve.
-
-Open questions:
-- Should an snpl be allowed to draw from *multiple* reserves (one
-  active loan from reserve A, next from reserve B)? Or pinned to one
-  at a time?
-- How to handle in-flight loans when switching reserves (probably
-  forbid switch while `active-loan` is some)?
-- Trait shape — likely a `reserve-trait` with `draw` and
-  `notify-return` signatures so any reserve implementation can plug in.
-
-This unlocks competitive lending: the same borrower's snpl could shop
-for the best rate by switching reserves between loans.
-
-### 3. Underflow assertion in `notify-return`
-
-Removed in the POC because Clarity's uint subtraction panics on
-underflow anyway. If a future change introduces multiple in-flight
-loans per snpl (or any path where outstanding could drift below
-notional), reinstate `(asserts! (<= notional current) ERR-UNDERFLOW)`.
-
-### 4. Permissionless withdraws
-
-`withdraw-sbtc` and `withdraw-stx` on the reserve are permissionless
-because funds always flow to the hardcoded LENDER (no theft). The DoS
-angle: anyone can drain the reserve to LENDER's EOA, forcing a
-re-`supply` before snpls can draw. Fine for POC; if it gets griefed
-in production, re-add the LENDER-only assert.
+`snpl-trait.get-loan` specifies the full loan record shape. Future
+snpl variants that need different fields (e.g., a different swap
+venue with different metadata) will require a trait revision and
+parallel deployment.
