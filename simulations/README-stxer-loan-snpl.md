@@ -1,0 +1,219 @@
+# Stxer Mainnet Fork Simulations — loan-reserve + snpl
+
+Lifecycle proofs for the **two-contract loan architecture** introduced in
+`contracts/loan/`: a pooled `loan-reserve` and per-borrower
+`loan-sbtc-stx-0-jing` (snpl). Every sim runs against a real mainnet fork
+of `SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2` and uses
+live Pyth VAAs for `close-and-settle-with-refresh` calls.
+
+For the older single-contract PoC (`jing-loan-sbtc-stx-single`) sims, see
+`README-stxer-jing-loan.md`.
+
+## Stxer accommodations
+
+The snpl source compiled into stxer sims is `loan-sbtc-stx-0-jing-stxer.clar`
+which differs from production in two places:
+
+| Site | Mainnet | Stxer |
+|---|---|---|
+| `CLAWBACK-DELAY` (line 59) | `u4200` (~29 days) | `u0` |
+| `swap-deposit` deadline assert (line 185) | active | commented out |
+
+Stxer runs every step at the same burn-block-height; with `CLAWBACK-DELAY u0`
+the deadline equals the borrow block, which would otherwise trip the strict
+`(< burn-block-height deadline)` gate inside `swap-deposit`. The
+production contract keeps both checks intact.
+
+The reserve copy `loan-reserve-stxer.clar` is byte-identical to the production
+`loan-reserve.clar`.
+
+## Mainnet principals used
+
+| Role | Address | Purpose |
+|---|---|---|
+| LENDER (deployer) | `SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M` | Reserve lender, snpl deployer |
+| BORROWER | `SP3KJBWTS3K562BF5NXWG5JC8W90HEG7WPYH5B97X` | Snpl borrower |
+| SBTC_WHALE | `SP24MM95FEZJY3XWSBGZ5CT8DV04J6NVM5QA4WDXZ` | Seeds LENDER (~276 sBTC mainnet) |
+| STX_DEPOSITOR_1 | `SP14TZ17WHN486XFHFKHD1KTT6Z721NT40HV59T3K` | ~41,527 STX |
+| STX_DEPOSITOR_2 | `SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG` | ~14,449 STX |
+| JING_TREASURY | `SMH8FRN30ERW1SX26NJTJCKTDR3H27NRJ6W75WQE` | Hardcoded protocol-fee destination |
+
+---
+
+## Sim 1: Happy path via cancel-swap (`simul-loan-snpl-happy.js`)
+
+Full repay lifecycle proving the 10% protocol fee on interest. Borrower
+deposits into Jing then pulls back via `cancel-swap` (stxer stand-in for a
+naturally-cleared deposit), tops up the interest shortfall, and repays.
+
+```bash
+npx tsx simulations/simul-loan-snpl-happy.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/bda9fa4bad7f2306d352cdd768bb55ea
+
+### Flow
+
+```
+LENDER.initialize() x2  →  whale → LENDER 23M sats
+LENDER.supply(22M)  →  open-credit-line(snpl, BORROWER, 22M, 100bps)
+BORROWER.borrow(22M, 100, reserve)  →  swap-deposit(1, 31_152_648_000_000)
+BORROWER.cancel-swap(1)        [zeros our-sbtc-in-jing for repay gate]
+whale → BORROWER 1M sats       [covers 220k interest shortfall]
+BORROWER.repay(1, reserve)     [protocol fee fires]
+LENDER.withdraw-sbtc(22.198M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 11 | `swap-deposit` fires real Jing `deposit-sbtc 22M` into cycle 8 |
+| 24 | `cancel-swap` fires real Jing `refund-sbtc 22M` |
+| 30 | `repay` emits **three** FT_TRANSFERs: 220k borrower→snpl, **22k snpl→`SMH8...75WQE`**, 22.198M snpl→reserve |
+| 30 | Print event: `fee-sbtc u22000`, `lender-payoff-sbtc u22198000` |
+| 29 vs 35 | JING_TREASURY balance: `u345885` → `u367885` = **exactly +22k sats** |
+| 35–37 | Reserve drained, LENDER ends at `u23198000` (+220k vs supply) |
+
+### Accounting
+
+| Actor | Δ |
+|---|---|
+| LENDER | +198k sats (= 0.9% of 22M; 1% gross − 10% protocol carve-out) |
+| JING_TREASURY | +22k sats (10% of 220k interest) |
+| BORROWER | −220k sats (full interest paid) |
+| Reserve | clean (`outstanding-sbtc u0`) |
+
+---
+
+## Sim 2: Seize / sBTC-binding (`simul-loan-snpl-seize.js`)
+
+Default path with **real Jing settlement** where the snpl's sBTC is on the
+binding side and fully clears at the DEX clearing price. Snpl receives STX
+directly from `distribute-sbtc-depositor`. Lender seizes the STX position.
+
+This is the natural outcome at most fork blocks because mainnet cycle 8
+already carries enough STX-side demand to absorb a 22M-sat sBTC deposit.
+
+```bash
+npx tsx simulations/simul-loan-snpl-seize.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/b6629bcaba5e7160ae600a6d936258e5  
+*(reference run with two unused defensive calls: `d1399c921e93a4ca857d2ed4e454690b`)*
+
+### Flow
+
+```
+[deploy + init + seed + supply + open-line + borrow as above, 22M sats]
+BORROWER.swap-deposit(1, 31_152_648_000_000)         [22M sats → cycle 8]
+STX_DEPOSITOR_1 → Jing.deposit-stx(41k STX, limit)
+STX_DEPOSITOR_2 → Jing.deposit-stx(14k STX, limit)
+LENDER → Jing.close-and-settle-with-refresh(VAA)
+LENDER.seize(1, reserve)                              [past deadline]
+LENDER.withdraw-stx(70k floor)                        [residual stays in reserve]
+```
+
+### Key proof points (reference run)
+
+| Step | Evidence |
+|---|---|
+| 14–15 | Both STX depositors fire real Jing `deposit-stx` (41k + 14k STX) |
+| 17 | Settlement event: `binding-side "sbtc"`, `sbtc-cleared u22192927`, `sbtc-unfilled u0`, clearing 337,990 STX/BTC (above our 311k floor → we get the better rate) |
+| 17 | `distribute-sbtc-depositor` to snpl: `stx-received u74283562076` (~74.28k STX), `sbtc-rolled u0` |
+| 17 | Our STX deposits (limit below clearing) emit `limit-roll-stx` — they didn't fill |
+| 25 | `seize`: STX_TRANSFER 74.28k STX snpl→reserve, `notify-return(22M)`, **no FT_TRANSFER to JING_TREASURY** (no-fee-on-seize) |
+| 33 | JING_TREASURY balance reflects only Jing's settlement fees, not our 10% carve-out |
+| 26 | Loan stamped `position-stx u74283562076`, `status u2` (SEIZED) |
+
+### Why "binding sBTC" was the outcome
+
+- Mainnet cycle 8 had ~191k STX of pre-existing demand at various limits
+- At clearing 337,990 STX/BTC, that absorbs all 22.19M sats of sBTC deposited
+- Our 55k STX deposits had limits *below* clearing → they roll instead of filling
+- The lender comes out ahead on this branch: 74.28k STX recovered, market price > 311k floor
+
+---
+
+## Sim 3: Seize / sBTC-rolling (`simul-loan-snpl-seize-rolled.js`)
+
+Inverse of Sim 2. Forces the snpl onto the rolling side by depositing more
+sBTC than mainnet's STX-side liquidity can absorb (1 BTC = 100M sats
+deposit, no STX-side depositors from us). Settlement clears only the
+filled portion; the remainder rolls into cycle N+1 and is recovered via
+`cancel-swap` before `seize` ships both legs.
+
+```bash
+npx tsx simulations/simul-loan-snpl-seize-rolled.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/b68c6cd80aa82a061ec2b9534c2d41c4
+
+### Flow
+
+```
+[deploy + init + seed 110M + supply 100M + open-line(100M, 100bps) + borrow]
+BORROWER.swap-deposit(1, 31_152_648_000_000)         [100M sats → cycle 8]
+LENDER → Jing.close-and-settle-with-refresh(VAA)
+BORROWER.cancel-swap(1)                               [pulls rolled sBTC from N+1]
+LENDER.seize(1, reserve)                              [past deadline]
+LENDER.withdraw-stx(100k floor) + withdraw-sbtc(10M floor)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 11 | `swap-deposit` 100M sats → Jing cycle 8 |
+| 14 | Cycle totals: total-sbtc `u100192927`, total-stx `u136627296612` (no STX from us) |
+| 15 | Settlement event: **`binding-side "stx"`**, `sbtc-cleared u40095533`, **`sbtc-unfilled u59904467`**, clearing 337,913 STX/BTC |
+| 15 | `distribute-sbtc-depositor` to snpl: `sbtc-rolled u59904467`, `stx-received u135352658451` |
+| 19 | `our-sbtc-in-jing(cycle 9) = u59904467` ← the rolled portion sitting in N+1 |
+| 20 | `cancel-swap`: real Jing `refund-sbtc u59904467` cycle 9 → snpl |
+| 22 | Snpl sBTC balance after cancel: `u59904467` (recovered) |
+| 23 | `seize`: STX_TRANSFER **135.35k STX** + FT_TRANSFER **59.9M sats** snpl→reserve, `notify-return(100M)` |
+| 23 | Print event: `stx-seized u135352658451`, `sbtc-seized u59904467` |
+| 31 vs prior | JING_TREASURY balance moved `u367885` → `u385981` (= +18,096 sats from Jing's own protocol fees on this cycle's settlement, **not** our 10% carve-out — `seize` correctly skips the fee path) |
+| 30 | Credit-line `outstanding-sbtc u0` ← `notify-return` released the principal credit |
+
+### Accounting (lender perspective)
+
+| Asset | Movement |
+|---|---|
+| sBTC | Supplied 100M, recovered 59.9M (rolled portion) → 40.1M sat shortfall |
+| STX | Received 135.35k STX from Jing's clearing distribution |
+
+The 40.1M-sat sBTC shortfall is offset by the 135.35k STX recovered. At
+clearing 337,913 STX/BTC, those STX are worth 135.35k / 337,913 ≈ 0.401
+BTC = 40.06M sats. Net: lender breaks even on principal at the clearing
+price; the borrower's interest portion (1M sats payoff − 100M notional)
+is forfeited because seize pays no protocol fee and credits only the
+notional via `notify-return`.
+
+---
+
+## Coverage matrix
+
+| Branch | sim | binding side | rolled sBTC | protocol fee paid |
+|---|---|---|---|---|
+| `repay` happy path | 1 | n/a (cancel-swap stand-in) | 0 | yes (10% × 220k = 22k sats) |
+| `seize` after full clear | 2 | sBTC | 0 | no |
+| `seize` after partial clear | 3 | STX | 59.9M sats | no |
+
+Open seize state-space:
+
+- `seize` past deadline with **no Jing settlement at all** (snpl never deposited, or cancel-swap was used pre-settle): produces clean STX=0 / sBTC=notional reserve receipt. Trivial extension of Sim 1 by skipping repay and calling seize instead.
+- `seize` with **STX-only seize proceeds** (no leftover sBTC): subset of Sim 2.
+- `seize` with **both legs nonzero** at the seize call: Sim 3 is the canonical case.
+
+## Open follow-ups for full lifecycle coverage
+
+Not yet ported from the old single-contract PoC suite:
+
+- `simul-loan-snpl-rollover.js` — borrow → repay → borrow again on the same snpl
+- `simul-loan-snpl-reborrow-after-seize.js` — borrow → seize → reopen credit line → borrow again
+- `simul-loan-snpl-set-swap-limit.js` — exercise `set-swap-limit` relay to Jing
+- `simul-loan-snpl-set-reserve.js` — borrower swaps reserves between loans (active-loan gate)
+- `simul-loan-snpl-errors.js` — bundle of revert paths: `ERR-WRONG-RESERVE`, `ERR-INTEREST-MISMATCH`, `ERR-OVER-LIMIT`, `ERR-NOT-LENDER`/`-BORROWER`, `ERR-PAUSED`, `ERR-ALREADY-INIT`, `ERR-BORROWER-MISMATCH`, `ERR-NOT-DEPLOYER`
+- `simul-loan-snpl-admin.js` — `set-credit-line-cap`, `set-credit-line-interest`, `set-min-sbtc-draw`, `set-paused`, `close-credit-line`
+- Multi-snpl on one reserve — canonical-bytecode value prop
