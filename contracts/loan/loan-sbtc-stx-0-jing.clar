@@ -33,11 +33,13 @@
 ;; is committed. They either repay (allowed any time, even before
 ;; swapping) or get seized after the deadline.
 
+(impl-trait .snpl-trait.snpl-trait)
+
 (define-constant SBTC 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 (define-constant JING-MARKET 'SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2)
 ;; Immutable borrower. REPLACE BEFORE DEPLOYMENT.
 (define-constant BORROWER 'SP3KJBWTS3K562BF5NXWG5JC8W90HEG7WPYH5B97X)
-;; Reserve contract (resolves to same deployer as this single).
+;; Reserve contract (resolves to same deployer as this snpl).
 (define-constant RESERVE .loan-reserve)
 
 (define-constant CLAWBACK-DELAY u4200)
@@ -71,10 +73,10 @@
 
 ;; ---------- Read-only ----------
 
-(define-read-only (get-reserve) RESERVE)
-(define-read-only (get-borrower) BORROWER)
-(define-read-only (get-active-loan) (var-get active-loan))
-(define-read-only (get-loan (loan-id uint)) (map-get? loans loan-id))
+(define-read-only (get-reserve) (ok RESERVE))
+(define-read-only (get-borrower) (ok BORROWER))
+(define-read-only (get-active-loan) (ok (var-get active-loan)))
+(define-read-only (get-loan (loan-id uint)) (ok (map-get? loans loan-id)))
 
 (define-read-only (payoff-on-loan (loan-id uint))
   (match (map-get? loans loan-id)

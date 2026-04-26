@@ -23,6 +23,8 @@
 ;; Lender EOA. REPLACE BEFORE DEPLOYMENT.
 (define-constant LENDER 'SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M)
 
+(use-trait snpl-trait .snpl-trait.snpl-trait)
+
 (define-constant ERR-NOT-LENDER (err u200))
 (define-constant ERR-NO-CREDIT-LINE (err u201))
 (define-constant ERR-OVER-LIMIT (err u202))
@@ -30,8 +32,8 @@
 (define-constant ERR-LINE-EXISTS (err u205))
 (define-constant ERR-LINE-NOT-FOUND (err u206))
 (define-constant ERR-OUTSTANDING-NONZERO (err u207))
-(define-constant ERR-UNDERFLOW (err u208))
 (define-constant ERR-PAUSED (err u209))
+(define-constant ERR-BORROWER-MISMATCH (err u210))
 
 (define-data-var paused bool false)
 (define-data-var min-sbtc-draw uint u1000000) ;; 0.01 sBTC, applied across all snpls
@@ -81,20 +83,21 @@
 
 ;; ---------- Credit lines (lender-gated) ----------
 
-(define-public (open-credit-line (snpl principal) (borrower principal) (cap-sbtc uint) (interest-bps uint))
-  (begin
+(define-public (open-credit-line (snpl <snpl-trait>) (borrower principal) (cap-sbtc uint) (interest-bps uint))
+  (let ((snpl-addr (contract-of snpl)))
     (asserts! (is-eq tx-sender LENDER) ERR-NOT-LENDER)
-    (asserts! (is-none (map-get? credit-lines snpl)) ERR-LINE-EXISTS)
-    (map-set credit-lines snpl {
+    (asserts! (is-none (map-get? credit-lines snpl-addr)) ERR-LINE-EXISTS)
+    (asserts! (is-eq (try! (contract-call? snpl get-borrower)) borrower) ERR-BORROWER-MISMATCH)
+    (map-set credit-lines snpl-addr {
       borrower: borrower,
       cap-sbtc: cap-sbtc,
       interest-bps: interest-bps,
       outstanding-sbtc: u0
     })
-    (print { event: "open-credit-line", 
-             snpl: snpl, 
+    (print { event: "open-credit-line",
+             snpl: snpl-addr,
              borrower: borrower,
-             cap-sbtc: cap-sbtc, 
+             cap-sbtc: cap-sbtc,
              interest-bps: interest-bps })
     (ok true)))
 
@@ -170,7 +173,6 @@
   (let ((caller contract-caller)
         (line (unwrap! (map-get? credit-lines caller) ERR-NO-CREDIT-LINE))
         (current (get outstanding-sbtc line)))
-    (asserts! (<= notional current) ERR-UNDERFLOW)
     (map-set credit-lines caller (merge line {
       outstanding-sbtc: (- current notional)
     }))
