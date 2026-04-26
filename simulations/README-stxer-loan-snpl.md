@@ -324,15 +324,115 @@ single bytecode hash regardless of how many snpls they fund.
 
 ---
 
+## Sim 6: Set-reserve between loans (`simul-loan-snpl-set-reserve.js`)
+
+Canonical-bytecode demo for **reserves** (Sim 5 did it for snpls). Two
+loan-reserves deployed from the same source under different names by the
+same principal yield byte-identical bytecode. Cross-principal operational
+ownership comes via `initialize`'s `init-lender` argument — the deployer
+of reserve-B sets the lender to a different account, so all subsequent
+`supply` / `open-credit-line` / `withdraw-sbtc` calls on reserve-B come
+from that account.
+
+Borrower opens loan u1 against reserve-A, repays, switches via
+`set-reserve(reserve-B)`, opens loan u2 against reserve-B, repays. Each
+lender pockets +198k sats independently.
+
+Also covers two new negative tests not exercised by any prior sim:
+`ERR-ACTIVE-LOAN-EXISTS (u104)` on `set-reserve` mid-loan, and
+`ERR-WRONG-RESERVE (u113)` on `borrow` with the old reserve trait
+reference after the switch.
+
+```bash
+npx tsx simulations/simul-loan-snpl-set-reserve.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/0a44715825543fc713fb7a1faa9db52e
+
+### Trait-resolution gotcha (learned the hard way)
+
+The first attempt deployed reserve-B under LENDER_B as a separate
+deployer. It failed: the source uses *relative* trait references
+(`(impl-trait .reserve-trait.reserve-trait)` and
+`(use-trait snpl-trait .snpl-trait.snpl-trait)`) which resolve to
+`<deployer>.reserve-trait` / `<deployer>.snpl-trait`. When LENDER_B
+deploys, those resolve to `LENDER_B.reserve-trait` (which doesn't exist).
+
+Even if LENDER_B redeployed their own copies of both traits, a deeper
+issue remains: trait identity in Clarity is `(deployer-principal,
+trait-name)`, so `LENDER_B.reserve-trait` and `LENDER_A.reserve-trait`
+are *different types*. The snpl is typed against LENDER_A's trait, so
+a reserve impl-ing LENDER_B's trait would be rejected by the snpl's
+`<reserve-trait>` parameter.
+
+The fix: deploy **both reserves under LENDER_A** (so trait references
+resolve consistently), and use `initialize`'s `init-lender` to set
+reserve-B's lender to LENDER_B. Operational ownership flows through
+data-vars while trait identity stays unified.
+
+Production deployments avoid this by using *absolute* trait references
+in the source (e.g., `'SP_PROTOCOL.reserve-trait.reserve-trait`) so any
+deployer can produce a reserve that impls the canonical trait. The
+stxer source uses relative refs, which is fine for any single-protocol
+deployment but constrains multi-deployer testing.
+
+### Flow
+
+```
+LENDER_A deploys: reserve-trait, snpl-trait, loan-reserve-a, snpl, loan-reserve-b
+  (all five contracts, all from LENDER_A so traits resolve consistently)
+LENDER_A.initialize on reserve-a (lender = LENDER_A)
+LENDER_A.initialize on reserve-b (lender = LENDER_B)  ← cross-principal
+LENDER_A.initialize on snpl (borrower = BORROWER, reserve = reserve-a)
+SBTC_WHALE -> LENDER_A 23M, SBTC_WHALE -> LENDER_B 23M
+LENDER_A: reserve-a.supply(22M) + open-credit-line(snpl, BORROWER, 22M, 100bps)
+LENDER_B: reserve-b.supply(22M) + open-credit-line(snpl, BORROWER, 22M, 100bps)
+BORROWER.borrow on snpl with reserve-A trait -> loan u1
+BORROWER.set-reserve(reserve-b) mid-loan                 [(err u104)]
+BORROWER: swap-deposit + cancel-swap + topup + repay(reserve-A)  [loan u1 closed]
+BORROWER.set-reserve(reserve-b)                          [(ok true)]
+BORROWER.borrow with reserve-A trait                     [(err u113)]
+BORROWER.borrow with reserve-B trait -> loan u2
+BORROWER: swap-deposit + cancel-swap + topup + repay(reserve-B)  [loan u2 closed]
+LENDER_A.withdraw-sbtc(22.198M) on reserve-a
+LENDER_B.withdraw-sbtc(22.198M) on reserve-b
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 3 vs 5 | reserve-a vs reserve-b deploys: **identical execution costs** (Runtime 480,200, Read 5/178, Write 9/10,797) — canonical bytecode for reserves |
+| 6, 7 | Both initialize succeed under LENDER_A as deployer; reserve-b print event records `lender LENDER_B` |
+| 10 | `reserve-a.get-lender` returns LENDER_A |
+| 11 | `reserve-b.get-lender` returns LENDER_B (different operational owner via initialize) |
+| 16, 17 | LENDER_B can `supply` and `open-credit-line` on reserve-b — tx-sender == lender check passes against the cross-principal lender |
+| 21 vs 22 | After loan u1 borrow: A.outstanding `u22000000`, **B.outstanding `u0`** |
+| **23** | `set-reserve` mid-loan: `(err u104)` ERR-ACTIVE-LOAN-EXISTS ← **new negative test** |
+| 28 vs 29 | After loan u1 repay: A.outstanding `u0`, **B.outstanding STILL `u0`** ← never touched |
+| 30 | `set-reserve(reserve-b)`: `(ok true)`, print event records the switch |
+| 31 | `(get-reserve)` returns `reserve-b` |
+| **32** | `borrow` with old reserve-A trait: `(err u113)` ERR-WRONG-RESERVE ← **new negative test** |
+| 33 | `borrow` with reserve-B trait: `(ok u2)` — `next-loan-id` incremented |
+| 34 vs 35 | After loan u2 borrow: A.outstanding STILL `u0`, B.outstanding `u22000000` |
+| 36, 37 | Loan u1 status STILL `u1` (REPAID), Loan u2 status `u0` (OPEN) |
+| 41 | Loan u2 repay print: `fee-sbtc u22000`, `lender-payoff-sbtc u22198000`, reserve = reserve-b |
+| 45, 46 | Each LENDER withdraws 22.198M from their respective reserve independently |
+| 49, 50 | LENDER_A and LENDER_B both end at `u23198000` (= +198k net each) |
+| 51 | JING_TREASURY: `u389885` − pre-sim `u345885` = **exactly +44k** (22k per repay) |
+
+---
+
 ## Coverage matrix
 
-| Branch | sim | snpls | settlement | binding side | rolled sBTC | stx-released to borrower | cancel-swap caller | protocol fee paid |
-|---|---|---|---|---|---|---|---|---|
-| `repay` (synthetic) | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | borrower | yes (22k sats) |
-| `repay` (real Jing) | 2 | 1 | close-and-settle | sBTC | 0 | u74227883093 ✓ | borrower (defensive) | yes (22k sats) |
-| `seize` after full clear | 3 | 1 | close-and-settle | sBTC | 0 | n/a | borrower (defensive) | no |
-| `seize` after partial clear | 4 | 1 | close-and-settle | STX | 59.9M sats | n/a | borrower | no |
-| Multi-snpl repay + seize | 5 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower (A) **+ lender (B)** | yes on A only |
+| Branch | sim | snpls | reserves | settlement | binding side | rolled sBTC | stx-released to borrower | cancel-swap caller | protocol fee paid |
+|---|---|---|---|---|---|---|---|---|---|
+| `repay` (synthetic) | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | borrower | yes (22k sats) |
+| `repay` (real Jing) | 2 | 1 | 1 | close-and-settle | sBTC | 0 | u74227883093 ✓ | borrower (defensive) | yes (22k sats) |
+| `seize` after full clear | 3 | 1 | 1 | close-and-settle | sBTC | 0 | n/a | borrower (defensive) | no |
+| `seize` after partial clear | 4 | 1 | 1 | close-and-settle | STX | 59.9M sats | n/a | borrower | no |
+| Multi-snpl repay + seize | 5 | 2 | 1 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower (A) **+ lender (B)** | yes on A only |
+| Set-reserve between loans | 6 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
 
 Open seize state-space:
 
