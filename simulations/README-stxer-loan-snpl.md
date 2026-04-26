@@ -86,7 +86,67 @@ LENDER.withdraw-sbtc(22.198M)
 
 ---
 
-## Sim 2: Seize / sBTC-binding (`simul-loan-snpl-seize.js`)
+## Sim 2: TRUE happy path with real Jing settle (`simul-loan-snpl-true-happy.js`)
+
+Same lifecycle as Sim 1 but with a real `close-and-settle-with-refresh`
+instead of a `cancel-swap` stand-in. Snpl naturally accumulates STX from
+Jing's `distribute-sbtc-depositor`; borrower repays the full 22.22M sats
+payoff and **the snpl's STX position releases to the borrower** in the
+same atomic transaction. Exercises the `(if (> stx-out u0) ...)` branch
+in `repay` that's dead in Sim 1 (where `stx-released u0`).
+
+```bash
+npx tsx simulations/simul-loan-snpl-true-happy.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/be4c488839924f5bc4e40fcac48634d9
+
+### Flow
+
+```
+[deploy + init + seed + supply + open-line + borrow + swap-deposit as Sim 1]
+STX_DEPOSITOR_1 + _2 -> Jing.deposit-stx(41k + 14k STX)
+LENDER -> Jing.close-and-settle-with-refresh(VAA)
+  -> snpl receives ~74k STX directly (sBTC fully cleared, binds)
+BORROWER.cancel-swap(1)            [defensive — no rolled sBTC, harmless revert]
+SBTC_WHALE -> BORROWER 25M sats    [covers full 22.22M payoff shortfall]
+BORROWER.repay(1, reserve)
+  -> 22.22M sats topup borrower -> snpl
+  -> 22k sats snpl -> JING_TREASURY  (protocol fee)
+  -> 22.198M sats snpl -> reserve     (lender payoff)
+  -> 74.22k STX snpl -> BORROWER      *** STX-RELEASE BRANCH ***
+LENDER.withdraw-sbtc(22.198M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 14 | Settlement event: `binding-side "sbtc"`, `sbtc-cleared u22192927`, `sbtc-unfilled u0` at clearing 337,737 STX/BTC |
+| 14 | `distribute-sbtc-depositor` to snpl: `stx-received u74227883093`, `sbtc-rolled u0` |
+| 15 | snpl STX balance after settle: `u74227883093` (~74.22k STX) |
+| 18 | `cancel-swap` `(err u1008)` — defensive call, no Jing position; harmless |
+| 25 | Repay emits **four** transfers in one tx: 22.22M borrower→snpl, **22k snpl→JING_TREASURY**, 22.198M snpl→reserve, **74.22k STX snpl→BORROWER** |
+| 25 | Print event: `fee-sbtc u22000`, `lender-payoff-sbtc u22198000`, **`stx-released u74227883093`** (was `u0` in Sim 1) |
+| 26 | Loan stamped `position-stx u74227883093`, `status u1` (REPAID) |
+| 23 vs 30 | Borrower STX delta: `u34691837387` → `u108919720480` = **+74.22k STX** received |
+| 22 vs 31 | Borrower sBTC delta: `u26303205` → `u4083205` = **−22.22M** paid |
+| 24 vs 33 | JING_TREASURY delta: `u368078` → `u390078` = exactly **+22k sats** (protocol fee) |
+| 32, 36, 37 | Reserve drained to LENDER, ending at `u23198000` (+198k vs supply, identical to Sim 1) |
+
+### Why this matters
+
+Sim 1 used `cancel-swap` to zero out the Jing position before repay,
+which left the snpl holding *only* sBTC at repay time. That path could
+never test the `stx-out > 0` branch. Sim 2 hits that branch with real
+Jing settlement: borrower pays 22.22M sats principal+interest in
+exchange for the 74.22k STX swap proceeds, in a single repay tx. This
+is the production happy path; Sim 1 is the "borrower bailed before
+auction settlement" fallback.
+
+---
+
+## Sim 3: Seize / sBTC-binding (`simul-loan-snpl-seize.js`)
 
 Default path with **real Jing settlement** where the snpl's sBTC is on the
 binding side and fully clears at the DEX clearing price. Snpl receives STX
@@ -135,7 +195,7 @@ LENDER.withdraw-stx(70k floor)                        [residual stays in reserve
 
 ---
 
-## Sim 3: Seize / sBTC-rolling (`simul-loan-snpl-seize-rolled.js`)
+## Sim 4: Seize / sBTC-rolling (`simul-loan-snpl-seize-rolled.js`)
 
 Inverse of Sim 2. Forces the snpl onto the rolling side by depositing more
 sBTC than mainnet's STX-side liquidity can absorb (1 BTC = 100M sats
@@ -194,11 +254,12 @@ notional via `notify-return`.
 
 ## Coverage matrix
 
-| Branch | sim | binding side | rolled sBTC | protocol fee paid |
-|---|---|---|---|---|
-| `repay` happy path | 1 | n/a (cancel-swap stand-in) | 0 | yes (10% × 220k = 22k sats) |
-| `seize` after full clear | 2 | sBTC | 0 | no |
-| `seize` after partial clear | 3 | STX | 59.9M sats | no |
+| Branch | sim | settlement | binding side | rolled sBTC | stx-released to borrower | protocol fee paid |
+|---|---|---|---|---|---|---|
+| `repay` (synthetic) | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | yes (22k sats) |
+| `repay` (real Jing) | 2 | close-and-settle | sBTC | 0 | u74227883093 ✓ | yes (22k sats) |
+| `seize` after full clear | 3 | close-and-settle | sBTC | 0 | n/a | no |
+| `seize` after partial clear | 4 | close-and-settle | STX | 59.9M sats | n/a | no |
 
 Open seize state-space:
 
