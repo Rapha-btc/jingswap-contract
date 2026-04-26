@@ -252,14 +252,87 @@ notional via `notify-return`.
 
 ---
 
+## Sim 5: Two snpls on one reserve (`simul-loan-snpl-multi.js`)
+
+Proves the canonical-bytecode value prop and per-snpl isolation in one
+shot. Same source file deployed under two contract names yields two
+distinct contracts with byte-identical bytecode (and identical execution
+costs at deploy). Both share one `loan-reserve`. Snpl A completes a
+happy-path repay; snpl B is defaulted and seized. The reserve's
+`credit-lines` map is keyed per-snpl-principal so the two flows never
+interact.
+
+Bonus first: the LENDER-branch of `cancel-swap` (the post-deadline OR
+gate that lets a non-borrower clean up Jing position) is finally
+exercised when LENDER cancels snpl B's deposit before seizing.
+
+```bash
+npx tsx simulations/simul-loan-snpl-multi.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/7b1358da9ffdb8ffaa58ae9ce1c883de
+
+### Flow
+
+```
+LENDER deploys reserve-trait, snpl-trait, loan-reserve, snpl-A, snpl-B
+LENDER initializes reserve, snpl-A(BORROWER_A), snpl-B(BORROWER_B)
+SBTC_WHALE -> LENDER 50M
+LENDER supply 44M, open-credit-line(snpl-A, 22M, 100bps)
+LENDER open-credit-line(snpl-B, 22M, 100bps)
+BORROWER_A.borrow(22M) on snpl-A   |   BORROWER_B.borrow(22M) on snpl-B
+BORROWER_A.swap-deposit(1)         |   BORROWER_B.swap-deposit(1)
+BORROWER_A.cancel-swap (borrower branch)
+SBTC_WHALE -> BORROWER_A 1M
+BORROWER_A.repay(1, reserve)              [A.outstanding -> 0; B unchanged]
+LENDER.cancel-swap on snpl-B (LENDER branch — post-deadline OR)
+LENDER.seize(1, reserve) on snpl-B
+LENDER.withdraw-sbtc(44.198M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 4 vs 5 | snpl-A and snpl-B deploys: **identical execution cost** (Runtime 851,729, Read 16/110, Write 11/17,270) — same source -> same bytecode -> same Clarity charge |
+| 15, 16 | Two `credit-lines` entries appear, each keyed on its snpl principal, both `outstanding-sbtc u0` |
+| 19, 20 | After both `borrow`: A.outstanding `u22000000`, B.outstanding `u22000000` — **independently incremented** |
+| 21, 22 | `(get-loan u1)` on each snpl returns structurally identical loan records (same notional, payoff, deadline, interest-bps, status) |
+| 24, 25 | Both snpls fire real Jing `deposit-sbtc 22M` into cycle 8 — distinct depositor slots in the same cycle |
+| 26 | snpl-A `cancel-swap`: borrower-branch (`tx-sender = BORROWER_A`), real Jing `refund-sbtc 22M` |
+| 28 vs 35 | JING_TREASURY: `u345885` -> `u367885` = exactly `+22000` sats from A's repay |
+| 29 | A's repay print: `fee-sbtc u22000`, `lender-payoff-sbtc u22198000`, three FT_TRANSFERs as in Sim 1 |
+| **30, 31** | A.outstanding `u0`, **B.outstanding STILL `u22000000`** ← per-snpl isolation proof |
+| 32, 33 | A.status `u1` (REPAID), B.status `u0` (still OPEN) |
+| **36** | LENDER `cancel-swap` on snpl-B: sender `SP3TACXQF...` (LENDER, not BORROWER_B), `(ok true)`, real Jing `refund-sbtc 22M` ← **first sim to hit the LENDER branch** |
+| 38 | B's seize print: `sbtc-seized u22000000, stx-seized u0`, **no FT_TRANSFER to JING_TREASURY** |
+| 39, 40 | Both A.outstanding and B.outstanding now `u0` — credit lines independently closed |
+| 44, 45 | Reserve sBTC `u44198000` = 22.198M (A) + 22M (B); JING_TREASURY unchanged at `u367885` (no fee on B's seize) |
+| 46–48 | `withdraw-sbtc(44198000)` drains; LENDER ends at `u50198000` (= 50M seed − 44M supply + 44.198M withdraw = **+198k net**) |
+
+### Why the first proof of canonical bytecode lives here
+
+`loan-sbtc-stx-0-jing-stxer.clar` deliberately avoids any baked-in
+LENDER/BORROWER/RESERVE — those become runtime-set data-vars at
+`initialize`. Without that, every borrower would need a one-off
+contract source, every redeploy a new bytecode hash, and a third-party
+registry of approved snpl bytecodes (the design's whole point) would
+be impossible. Sim 5 is the empirical receipt: one source file,
+duplicated by name only, identical at compile time, identical at
+runtime, isolated state. The lender's review burden collapses to a
+single bytecode hash regardless of how many snpls they fund.
+
+---
+
 ## Coverage matrix
 
-| Branch | sim | settlement | binding side | rolled sBTC | stx-released to borrower | protocol fee paid |
-|---|---|---|---|---|---|---|
-| `repay` (synthetic) | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | yes (22k sats) |
-| `repay` (real Jing) | 2 | close-and-settle | sBTC | 0 | u74227883093 ✓ | yes (22k sats) |
-| `seize` after full clear | 3 | close-and-settle | sBTC | 0 | n/a | no |
-| `seize` after partial clear | 4 | close-and-settle | STX | 59.9M sats | n/a | no |
+| Branch | sim | snpls | settlement | binding side | rolled sBTC | stx-released to borrower | cancel-swap caller | protocol fee paid |
+|---|---|---|---|---|---|---|---|---|
+| `repay` (synthetic) | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 (branch dead) | borrower | yes (22k sats) |
+| `repay` (real Jing) | 2 | 1 | close-and-settle | sBTC | 0 | u74227883093 ✓ | borrower (defensive) | yes (22k sats) |
+| `seize` after full clear | 3 | 1 | close-and-settle | sBTC | 0 | n/a | borrower (defensive) | no |
+| `seize` after partial clear | 4 | 1 | close-and-settle | STX | 59.9M sats | n/a | borrower | no |
+| Multi-snpl repay + seize | 5 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower (A) **+ lender (B)** | yes on A only |
 
 Open seize state-space:
 
