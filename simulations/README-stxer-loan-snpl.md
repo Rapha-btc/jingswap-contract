@@ -517,6 +517,90 @@ Sim 8 confirms option 1 works end-to-end with no manual state cleanup.
 | Set-reserve between loans | 6 | 1 | 2 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
 | Rollover (repay → repay) | 7 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
 | Reborrow after seize | 8 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on loan 2 only (22k) |
+| Repay refund branch | 9 | 1 | 1 | 1 | close-and-settle | STX | 60.04M sats | u135352658451 ✓ | borrower | yes (100k — scales with 100M loan); **refund branch ⭐** |
+
+## Sim 9: Repay refund branch (`simul-loan-snpl-repay-refund.js`)
+
+The first sim to exercise the **refund branch** in `repay`. Every
+prior sim took the `is-shortfall` path (snpl had less sBTC than payoff,
+borrower topped up). This one constructs the inverse: real Jing settle
+leaves the snpl with rolled sBTC + STX position, then a whale airdrops
+105M sats directly to the snpl (simulating an over-stage, an
+out-of-band airdrop, or returned dust). At repay the snpl now holds
+*more* than payoff, the `(is-shortfall false)` branch fires, and the
+excess sBTC ships back to the borrower in the same atomic tx as the
+fee + lender-payoff + STX release.
+
+This is the only stxer-feasible way to hit the refund branch — it
+needs both real Jing distribution math (so the snpl ends up holding
+both legs) and a third-party sBTC sender (so snpl's sBTC exceeds what
+the borrower would have computed for shortfall topup).
+
+```bash
+npx tsx simulations/simul-loan-snpl-repay-refund.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/6f5f55ccb06717ec08da50d071141172
+
+### Flow
+
+```
+[deploy + init + seed 110M + supply 100M + open-line(100M, 100bps) + borrow]
+BORROWER.swap-deposit(1)               [100M sats -> Jing cycle 8]
+LENDER -> Jing.close-and-settle-with-refresh(VAA)
+  -> binding-side "stx", snpl receives ~135k STX, ~60M sats roll into N+1
+BORROWER.cancel-swap(1)                [recovers ~60M rolled to snpl]
+SBTC_WHALE -> snpl 105M sats           [over-stage / airdrop]
+  -> snpl sBTC = recovered + 105M = ~165M >> 101M payoff
+BORROWER.repay(1, reserve)
+  -> 4 transfers, NO borrower-to-snpl shortfall pull:
+     - 64M sBTC snpl -> BORROWER  (REFUND BRANCH)
+     - 100k snpl   -> JING_TREASURY (protocol fee)
+     - 100.9M snpl -> reserve     (lender-payoff)
+     - 135k STX snpl -> BORROWER  (STX-release)
+LENDER.withdraw-sbtc(100.9M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 12 | Settlement event: `binding-side "stx"`, `sbtc-cleared u39957961`, `sbtc-unfilled u60042039`, clearing 339,076 STX/BTC |
+| 12 | `distribute-sbtc-depositor` to snpl: `stx-received u135352658451`, `sbtc-rolled u60042039` |
+| 16 | `cancel-swap` fires real Jing `refund-sbtc u60042039` from cycle 9 → snpl |
+| 17 | snpl sBTC after cancel: `u60042039` (recovered exactly the rolled portion) |
+| 18 | Whale airdrop: real `FT_TRANSFER 105000000` whale → snpl |
+| 19 | snpl sBTC after airdrop: `u165042039` (= 60.04M + 105M, well above 101M payoff) |
+| 23 | Repay output `(ok true)` with **four** transfers — first is **snpl → BORROWER 64,042,039 sBTC** (refund), no `BORROWER → snpl` shortfall pull anywhere in the tx |
+| 23 | Print event: **`is-shortfall false`** ← key proof of refund branch firing, `delta-sbtc u64042039`, `fee-sbtc u100000`, `lender-payoff-sbtc u100900000`, `stx-released u135352658451` |
+| 24 | Loan stamped status `u1` REPAID, `position-stx u135352658451` |
+| 27 vs 21 | Borrower STX delta: `u34691837385 → u170044495836` = **+135.35k STX** released |
+| 28 vs 20 | Borrower sBTC delta: `u1303205 → u65345244` = **+64.04M** received as refund (never paid shortfall) |
+| 30 vs 22 | JING_TREASURY: `u385843 → u485843` = exactly **+100k sats** (10% of 1M interest — scales with loan size; 4.5× the 22k fee on 22M loans) |
+| 32–34 | Reserve drained to LENDER, ending at `u110900000` (= 110M seed − 100M supply + 100.9M withdraw → **+900k net = 100M × 100bps × 90%**) |
+
+### Why this matters
+
+The contract's repay logic has three reconciliation paths based on
+sbtc-balance vs payoff:
+
+| Branch | Trigger | Action | Sims that hit it |
+|---|---|---|---|
+| `is-shortfall true, delta > 0` | snpl has less than payoff | borrower → snpl `delta` (pull from wallet) | 1, 2, 4-8 (every other sim) |
+| `is-shortfall true, delta = 0` (exact) | snpl has exactly payoff | no transfer | none — would require precise pre-stage |
+| `is-shortfall false, delta > 0` (excess) | snpl has more than payoff | snpl → borrower `delta` (refund) | **9 (this one)** |
+
+The refund branch is the only safety valve for sBTC that arrives on
+the snpl outside the borrower's intended topup — a race condition that
+*will* happen in production whenever Jing returns dust late, a
+borrower frontend miscalculates the topup, or a third party sends
+sBTC to the snpl by mistake. Without this branch, that sBTC would be
+locked in the snpl forever (no admin extraction; the snpl has no
+sweep function). Sim 9 confirms the branch fires correctly with a
+real Jing settlement upstream and routes the excess back to the
+borrower as the only legitimate beneficiary.
+
+---
 
 ## Stxer coverage exhausted — moving to Clarinet
 
