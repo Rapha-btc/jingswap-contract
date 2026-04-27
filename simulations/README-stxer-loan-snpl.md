@@ -525,6 +525,7 @@ Sim 8 confirms option 1 works end-to-end with no manual state cleanup.
 | set-swap-limit relay | 10 | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 | borrower | yes (22k sats); **`set-swap-limit` ⭐** |
 | Multi-snpl real settle | 11 | 2 | 1 | 2 (1 ea) | close-and-settle | STX | 30.06M sats × 2 | u67676329225 × 2 | borrower (each) | yes on both repays (100k total); **per-depositor symmetry ⭐** |
 | Re-deposit same loan | 12 | 1 | 1 | 1 (with 2 swap-deposits) | cancel-swap stand-in (×2) | n/a | 0 | u0 | borrower | yes (22k sats); **swap-deposit idempotency ⭐** |
+| Lender withdraw mid-loan | 13 | 2 | 1 | 1 (A only — B's borrow `(err u1)`) | cancel-swap stand-in | n/a | 0 | u0 | borrower (A) | yes on A's repay (22k); **liquidity-vs-outstanding decoupling ⭐** |
 
 ## Sim 9: Repay refund branch (`simul-loan-snpl-repay-refund.js`)
 
@@ -828,6 +829,95 @@ Both paths converge on identical loan-record state. The snpl's
 `map-set loans loan-id (merge loan { limit-price ... })` works
 correctly under both invocations — proving idempotency of the loan
 record update under repeated mutations.
+
+---
+
+## Sim 13: Lender withdraw mid-loan (`simul-loan-snpl-lender-withdraw-mid-loan.js`)
+
+Proves the documented "available liquidity ≠ outstanding" property:
+the reserve's `withdraw-sbtc` has no outstanding-check, so the lender
+can drain reserve funds at any time, even while another snpl has an
+active loan. The consequence — a second borrower with an approved
+credit line cannot draw because the reserve is empty — manifests as
+`(err u1)` from the sBTC token transfer, distinct from any of the
+contract's own ERR codes.
+
+```bash
+npx tsx simulations/simul-loan-snpl-lender-withdraw-mid-loan.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/44def8ae506797a502962490b478bc76
+
+### Flow
+
+```
+LENDER deploys + initializes reserve, snpl-A, snpl-B
+LENDER supply 50M; open-credit-line(snpl-A, 22M); open(snpl-B, 22M)
+BORROWER_A.borrow(22M)               [reserve 50M -> 28M, A.outstanding 22M]
+LENDER.withdraw-sbtc(28M)            [reserve 28M -> 0, A.outstanding STILL 22M]
+BORROWER_B.borrow(22M)               [(err u1) — reserve empty]
+BORROWER_A continues: swap-deposit + cancel-swap + repay
+  -> reserve refills to 22.198M
+LENDER.withdraw-sbtc(22.198M)        [final drain]
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 14 | Reserve sBTC after supply: `u50000000` |
+| 16 | Reserve sBTC after A's borrow: `u28000000` (50M − 22M draw) |
+| 17 | A.outstanding `u22000000`, B.outstanding `u0` (independent map entries) |
+| **19** | LENDER.withdraw-sbtc(28000000): `(ok true)` ← **no outstanding-check, lender drained reserve while A's loan is active** |
+| 20 | Reserve sBTC: `u0` post-withdraw |
+| 21 | A.outstanding STILL `u22000000` ← unchanged by lender's withdraw |
+| **23** | BORROWER_B.borrow on snpl-B: **`(err u1)`** ← sBTC transfer error from empty reserve. Runtime 65,584 (vs ~106k for successful borrow — reverted partway). **Zero event logs** — no `"draw"`, no `"borrow"` event |
+| 24 | snpl-B `(get-active-loan)` = `none` ← loan u1 never created (tx fully reverted) |
+| 25 | B.outstanding stayed `u0` ← reserve's `map-set` rolled back atomically with the failed transfer |
+| 26-28 | A continues normally: swap-deposit + cancel-swap + repay (3-transfer pattern, fee 22k, lender-payoff 22.198M) |
+| 29 | Reserve sBTC after A's repay: `u22198000` |
+| 32 | LENDER final withdraw: `(ok true)` |
+| 34 | LENDER end: **`u55198000`** = 55M seed − 50M supply + 28M (mid-withdraw) + 22.198M (final) = **+198k net** (only A's loan generated interest) |
+
+### Failure-mode anatomy (B's borrow attempt)
+
+The reserve's `draw` function gates in this order:
+1. `(unwrap! (map-get? credit-lines caller) ERR-NO-CREDIT-LINE)` — passes (B's line was opened)
+2. `(asserts! (not (var-get paused)) ERR-PAUSED)` — passes
+3. `(asserts! (>= amount (var-get min-sbtc-draw)) ERR-INVALID-AMOUNT)` — passes
+4. `(asserts! (<= new-outstanding cap) ERR-OVER-LIMIT)` — passes (22M ≤ 22M cap)
+5. `(try! (as-contract? ((with-ft SBTC "sbtc-token" amount)) (try! (contract-call? SBTC transfer amount current-contract caller none))))` — **FAILS HERE** with `(err u1)` because the reserve principal holds 0 sBTC
+
+The `(err u1)` comes from the SBTC token contract's transfer function (insufficient balance). The reserve's `draw` propagates it via `try!`. The reserve's `map-set` of new outstanding (which would have updated B.outstanding to 22M) is part of the same atomic tx and rolls back. The snpl's `borrow` propagates the err further; its own `map-set` for the new loan record + `var-set active-loan` also roll back.
+
+### Production implication
+
+A malicious or panicking lender can create a **silent denial-of-service**
+for any other approved credit lines on the same reserve by draining
+the reserve. Borrowers see `(err u1)` from the sBTC token contract,
+which the snpl's `borrow` propagates uninterpreted — they can't
+distinguish "reserve ran dry" from any other sBTC transfer failure.
+
+Mitigations available to a frontend integrator:
+
+- **Pre-flight liquidity check**: read the reserve's sBTC balance via
+  `contract-call? sbtc-token get-balance reserve-id` before calling
+  `borrow`. Compare against the requested amount and surface a clear
+  "reserve undercollateralized" UX before the user signs.
+- **Lender reputation**: borrowers can choose between reserves (Sim
+  6) and a lender that's drained their reserve mid-loan loses
+  trustworthiness for future borrowers — but the on-chain state
+  doesn't enforce this.
+- **Contract-level fix**: would require an outstanding-aware
+  `withdraw-sbtc` like `(asserts! (>= (- new-balance amount)
+  total-outstanding) ERR-WOULD-UNDER-COLLATERALIZE)`. Out of scope
+  for the v2 design — the contract intentionally leaves liquidity
+  management to the lender's discretion (the original PoC's
+  `fund` / `withdraw-funds` had the same property).
+
+This sim documents the property; clarinet would naturally cover the
+positive case (`withdraw-sbtc` succeeds with multiple supply / draw
+combinations) and the silent-DoS edge cases.
 
 ---
 
