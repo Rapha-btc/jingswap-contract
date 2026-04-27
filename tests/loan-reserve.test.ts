@@ -299,6 +299,15 @@ describe.skipIf(!remoteDataEnabled)("loan-reserve", function () {
     expect(getSbtcBalance(RESERVE_ID)).toBe(before + SBTC_22M);
   });
 
+  it("supply: cumulative across multiple calls", function () {
+    initReserve(wallet1);
+    fundSbtc(wallet1, SBTC_22M);
+    expect(pub(RESERVE, "supply", [Cl.uint(SBTC_1M)], wallet1).result).toBeOk(Cl.bool(true));
+    expect(pub(RESERVE, "supply", [Cl.uint(SBTC_1M)], wallet1).result).toBeOk(Cl.bool(true));
+    expect(pub(RESERVE, "supply", [Cl.uint(SBTC_500K)], wallet1).result).toBeOk(Cl.bool(true));
+    expect(getSbtcBalance(RESERVE_ID)).toBe(SBTC_1M + SBTC_1M + SBTC_500K);
+  });
+
   // ------------------------------------------------------------------
   // withdraw-sbtc
   // ------------------------------------------------------------------
@@ -332,6 +341,16 @@ describe.skipIf(!remoteDataEnabled)("loan-reserve", function () {
     expect(getSbtcBalance(RESERVE_ID)).toBe(SBTC_1M);
   });
 
+  it("withdraw-sbtc: rejects zero amount", function () {
+    // sBTC SIP-010 transfer rejects amount=0; the call surfaces as an err
+    // and no funds move.
+    initReserve(wallet1);
+    supplyReserve(SBTC_1M, wallet1);
+    const res = pub(RESERVE, "withdraw-sbtc", [Cl.uint(0)], wallet1);
+    expect(res.result.type).toBe("err");
+    expect(getSbtcBalance(RESERVE_ID)).toBe(SBTC_1M);
+  });
+
   // ------------------------------------------------------------------
   // withdraw-stx (sweeps STX accumulated from seized snpl loans)
   // ------------------------------------------------------------------
@@ -355,6 +374,23 @@ describe.skipIf(!remoteDataEnabled)("loan-reserve", function () {
       .toBeOk(Cl.bool(true));
     expect(getStxBalance(RESERVE_ID)).toBe(0);
     expect(getStxBalance(wallet1)).toBe(lenderBefore + STX_AIRDROP);
+  });
+
+  it("withdraw-stx: rejects zero amount", function () {
+    // stx-transfer? rejects amount=0 (Clarity err 3 / NoSuchAsset).
+    initReserve(wallet1);
+    simnet.transferSTX(1_000_000, RESERVE_ID, wallet3); // give the contract STX so the only failure is the zero
+    const res = pub(RESERVE, "withdraw-stx", [Cl.uint(0)], wallet1);
+    expect(res.result.type).toBe("err");
+    expect(getStxBalance(RESERVE_ID)).toBe(1_000_000);
+  });
+
+  it("withdraw-stx: rejects when contract has no STX (with-stx constraint)", function () {
+    initReserve(wallet1);
+    expect(getStxBalance(RESERVE_ID)).toBe(0);
+    const res = pub(RESERVE, "withdraw-stx", [Cl.uint(1_000_000)], wallet1);
+    expect(res.result.type).toBe("err");
+    expect(getStxBalance(RESERVE_ID)).toBe(0);
   });
 
   // ------------------------------------------------------------------

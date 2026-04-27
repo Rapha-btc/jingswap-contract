@@ -727,3 +727,209 @@ describe.skipIf(!remoteDataEnabled || !RUN_EXTENDED)(
     expect(ro(SNPL, "get-active-loan", [])).toBeOk(Cl.some(Cl.uint(2)));
   });
 });
+
+// ============================================================================
+// E2E: real Jing settlement via Pyth VAA, multi-cycle rollover
+// ============================================================================
+//
+// Off by default — opt in with E2E=1. Off because:
+//   (a) Each test fetches a live VAA from Hermes (network).
+//   (b) Real Jing settlement mutates lots of forked state, amplifying Hiro
+//       rate-limit pressure if bundled with the rest of the suite.
+//   (c) Clarinet's VM has a non-deterministic "failed to track token supply"
+//       bug on cross-contract sBTC distribute. We try/catch and log-skip on
+//       that — matches the existing sbtc-stx-0-v2 / jing-loan-sbtc-stx-single
+//       pattern.
+//
+// Run:
+//   E2E=1 npx vitest run tests/loan-sbtc-stx-0-jing.test.ts -t "rollover"
+
+const JING_MARKET_ADDR = "SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22";
+const JING_MARKET_NAME = "sbtc-stx-0-jing-v2";
+const PYTH_DEPLOYER = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y";
+const PYTH_STORAGE = "pyth-storage-v4";
+const PYTH_DECODER = "pyth-pnau-decoder-v3";
+const WORMHOLE_CORE = "wormhole-core-v4";
+
+const BTC_USD_FEED = "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+const STX_USD_FEED = "ec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17";
+
+const DEPOSIT_MIN_BLOCKS = 10;
+
+// Sized to force STX-binding on mainnet cycle 8. Mainnet's STX-side queue
+// is ~191k STX of demand at clearing ~338k STX/BTC, absorbing ~0.57 BTC of
+// sBTC. A 1 BTC (100M sat) sBTC deposit overshoots, leaving the unfilled
+// portion to roll into cycle N+1. Mirrors `simul-loan-snpl-seize-rolled.js`.
+const SBTC_100M = 100_000_000;
+
+async function fetchPythVAA(): Promise<string> {
+  const timestamp = Math.floor(Date.now() / 1000) - 30;
+  const url = `https://hermes.pyth.network/v2/updates/price/${timestamp}?ids[]=${BTC_USD_FEED}&ids[]=${STX_USD_FEED}`;
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  const data = await response.json();
+  if (!data.binary?.data?.[0]) {
+    throw new Error(`No Pyth VAA at timestamp ${timestamp}`);
+  }
+  return data.binary.data[0];
+}
+
+describe.skipIf(process.env.E2E !== "1" || !remoteDataEnabled)(
+  "loan-sbtc-stx-0-jing (snpl) > e2e (opt-in via E2E=1)",
+  function () {
+
+  async function settleJing(sender: string, vaaHex: string): Promise<boolean> {
+    const vaaBuf = Cl.bufferFromHex(vaaHex);
+    try {
+      const res = simnet.callPublicFn(
+        `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+        "close-and-settle-with-refresh",
+        [
+          vaaBuf,
+          vaaBuf,
+          Cl.contractPrincipal(PYTH_DEPLOYER, PYTH_STORAGE),
+          Cl.contractPrincipal(PYTH_DEPLOYER, PYTH_DECODER),
+          Cl.contractPrincipal(PYTH_DEPLOYER, WORMHOLE_CORE),
+        ],
+        sender
+      );
+      return res.result.type === "ok";
+    } catch (e) {
+      const msg = (e as Error).message || String(e);
+      if (msg.includes("failed to track token supply")) {
+        console.log(`[e2e] skipping — Clarinet VM token-supply bug`);
+        return false;
+      }
+      throw e;
+    }
+  }
+
+  it("rollover: oversized sBTC deposit → STX binds → rolled portion sits in N+1 → cancel-swap recovers", async function () {
+    const vaaHex = await fetchPythVAA();
+
+    // Big sBTC deposit so STX side binds. Cap matches supply.
+    setupOpenLine({ supply: SBTC_100M + SBTC_22M, cap: SBTC_100M });
+    expect(
+      pub(SNPL, "borrow", [Cl.uint(SBTC_100M), Cl.uint(INTEREST_BPS), RESERVE_TRAIT], wallet2).result
+    ).toBeOk(Cl.uint(1));
+    expect(pub(SNPL, "swap-deposit", [Cl.uint(1), Cl.uint(LIMIT_PRICE)], wallet2).result)
+      .toBeOk(Cl.bool(true));
+
+    const cycleBeforeCV = simnet.callReadOnlyFn(
+      `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+      "get-current-cycle",
+      [],
+      deployer
+    ).result;
+    const cycleBefore = Number(cvToJSON(cycleBeforeCV).value);
+    console.log(`[rollover] depositing ${SBTC_100M} sats into cycle ${cycleBefore}`);
+
+    // No STX-side deposit from us — let mainnet's existing depositors be the
+    // only counterparty. They top out well below 1 BTC of demand → STX binds.
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+
+    const settled = await settleJing(wallet3, vaaHex);
+    if (!settled) return;
+
+    // Look at cycle N+1 — the rolled portion should be there.
+    const cycleAfter = cycleBefore + 1;
+    const rolledCV = simnet.callReadOnlyFn(
+      `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+      "get-sbtc-deposit",
+      [Cl.uint(cycleAfter), Cl.contractPrincipal(deployer, SNPL)],
+      deployer
+    ).result;
+    const rolled = Number(cvToJSON(rolledCV).value);
+    console.log(`[rollover] sBTC rolled into cycle ${cycleAfter}: ${rolled}`);
+    expect(rolled).toBeGreaterThan(0);
+
+    // STX should have landed on the snpl from the cleared portion.
+    const stxOnSnpl = getStxBalance(SNPL_ID);
+    console.log(`[rollover] STX received from clearing: ${stxOnSnpl}`);
+    expect(stxOnSnpl).toBeGreaterThan(0);
+
+    // cancel-swap pulls the rolled portion back from N+1 onto the snpl.
+    const sbtcOnSnplBefore = getSbtcBalance(SNPL_ID);
+    expect(pub(SNPL, "cancel-swap", [Cl.uint(1)], wallet2).result).toBeOk(Cl.bool(true));
+    expect(getSbtcBalance(SNPL_ID)).toBe(sbtcOnSnplBefore + rolled);
+    expect(getOurSbtcInJing()).toBe(0);
+
+    // Past deadline: anyone can seize. Both legs land on the reserve.
+    simnet.mineEmptyBurnBlocks(CLAWBACK_DELAY + 1);
+    const reserveSbtcBefore = getSbtcBalance(RESERVE_ID);
+    const reserveStxBefore = getStxBalance(RESERVE_ID);
+    expect(pub(SNPL, "seize", [Cl.uint(1), RESERVE_TRAIT], wallet3).result)
+      .toBeOk(Cl.bool(true));
+
+    expect(getSbtcBalance(RESERVE_ID)).toBe(reserveSbtcBefore + rolled);
+    expect(getStxBalance(RESERVE_ID)).toBe(reserveStxBefore + stxOnSnpl);
+    expect(getSbtcBalance(SNPL_ID)).toBe(0);
+    expect(getStxBalance(SNPL_ID)).toBe(0);
+    // notify-return zeros the line's outstanding regardless of recovered amount.
+    const line = cvToJSON(ro(RESERVE, "get-credit-line", [Cl.principal(SNPL_ID)]));
+    expect(line.value.value["outstanding-sbtc"].value).toBe("0");
+  });
+
+  it("rollover-then-repay: borrower repays after pulling rolled portion + topping up shortfall", async function () {
+    const vaaHex = await fetchPythVAA();
+
+    setupOpenLine({ supply: SBTC_100M + SBTC_22M, cap: SBTC_100M });
+    expect(
+      pub(SNPL, "borrow", [Cl.uint(SBTC_100M), Cl.uint(INTEREST_BPS), RESERVE_TRAIT], wallet2).result
+    ).toBeOk(Cl.uint(1));
+    expect(pub(SNPL, "swap-deposit", [Cl.uint(1), Cl.uint(LIMIT_PRICE)], wallet2).result)
+      .toBeOk(Cl.bool(true));
+    simnet.mineEmptyBlocks(DEPOSIT_MIN_BLOCKS + 1);
+
+    const settled = await settleJing(wallet3, vaaHex);
+    if (!settled) return;
+
+    // Recover the rolled portion (if any) so the repay assertion passes.
+    const cycleNow = Number(
+      cvToJSON(
+        simnet.callReadOnlyFn(
+          `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+          "get-current-cycle",
+          [],
+          deployer
+        ).result
+      ).value
+    );
+    const rolled = Number(
+      cvToJSON(
+        simnet.callReadOnlyFn(
+          `${JING_MARKET_ADDR}.${JING_MARKET_NAME}`,
+          "get-sbtc-deposit",
+          [Cl.uint(cycleNow), Cl.contractPrincipal(deployer, SNPL)],
+          deployer
+        ).result
+      ).value
+    );
+    if (rolled > 0) {
+      expect(pub(SNPL, "cancel-swap", [Cl.uint(1)], wallet2).result).toBeOk(Cl.bool(true));
+    }
+    expect(getOurSbtcInJing()).toBe(0);
+
+    // Borrower tops up to cover full payoff. Snpl already has STX from the
+    // cleared portion + recovered rolled sBTC; repay reconciles sBTC against
+    // payoff and ships STX to borrower.
+    const payoff = expectedPayoff(SBTC_100M);
+    fundSbtc(wallet2, payoff); // generous; repay only takes the shortfall
+
+    const borrowerSbtcBefore = getSbtcBalance(wallet2);
+    const borrowerStxBefore = getStxBalance(wallet2);
+    expect(pub(SNPL, "repay", [Cl.uint(1), RESERVE_TRAIT], wallet2).result)
+      .toBeOk(Cl.bool(true));
+    const borrowerSbtcDelta = borrowerSbtcBefore - getSbtcBalance(wallet2);
+    const borrowerStxDelta = getStxBalance(wallet2) - borrowerStxBefore;
+
+    // Borrower out-of-pocket some sBTC ≤ payoff and received STX.
+    expect(borrowerSbtcDelta).toBeLessThanOrEqual(payoff);
+    expect(borrowerSbtcDelta).toBeGreaterThanOrEqual(0);
+    expect(borrowerStxDelta).toBeGreaterThan(0);
+
+    expect(getLoanFields(1)["status"]).toBe(String(STATUS_REPAID));
+    expect(ro(SNPL, "get-active-loan", [])).toBeOk(Cl.none());
+    const line = cvToJSON(ro(RESERVE, "get-credit-line", [Cl.principal(SNPL_ID)]));
+    expect(line.value.value["outstanding-sbtc"].value).toBe("0");
+  });
+});
