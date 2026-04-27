@@ -221,7 +221,7 @@
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND)))
     (asserts! (is-eq tx-sender (var-get borrower)) ERR-NOT-BORROWER)
     (asserts! (is-eq (get status loan) STATUS-OPEN) ERR-BAD-STATUS)
-    (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE)
+    ;; (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE) // stxer cannot simulate blocks advance
     (map-set loans loan-id (merge loan { limit-price: limit-price }))
     (try! (as-contract? ()
       (try! (contract-call? JING-MARKET set-sbtc-limit limit-price))))

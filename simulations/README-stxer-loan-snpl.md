@@ -12,17 +12,21 @@ For the older single-contract PoC (`jing-loan-sbtc-stx-single`) sims, see
 ## Stxer accommodations
 
 The snpl source compiled into stxer sims is `loan-sbtc-stx-0-jing-stxer.clar`
-which differs from production in two places:
+which differs from production in three places:
 
 | Site | Mainnet | Stxer |
 |---|---|---|
 | `CLAWBACK-DELAY` (line 59) | `u4200` (~29 days) | `u0` |
 | `swap-deposit` deadline assert (line 185) | active | commented out |
+| `set-swap-limit` deadline assert (line 224) | active | commented out |
 
 Stxer runs every step at the same burn-block-height; with `CLAWBACK-DELAY u0`
 the deadline equals the borrow block, which would otherwise trip the strict
-`(< burn-block-height deadline)` gate inside `swap-deposit`. The
-production contract keeps both checks intact.
+`(< burn-block-height deadline)` gates inside `swap-deposit` and
+`set-swap-limit`. Both gates use the same `<` semantics, so both must be
+disabled for stxer mode. The production contract keeps all three checks
+intact (see `loan-sbtc-stx-0-jing.clar`); deadline-gate enforcement is
+clarinet's responsibility.
 
 The reserve copy `loan-reserve-stxer.clar` is byte-identical to the production
 `loan-reserve.clar`.
@@ -518,6 +522,7 @@ Sim 8 confirms option 1 works end-to-end with no manual state cleanup.
 | Rollover (repay → repay) | 7 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on both repays (44k total) |
 | Reborrow after seize | 8 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on loan 2 only (22k) |
 | Repay refund branch | 9 | 1 | 1 | 1 | close-and-settle | STX | 60.04M sats | u135352658451 ✓ | borrower | yes (100k — scales with 100M loan); **refund branch ⭐** |
+| set-swap-limit relay | 10 | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 | borrower | yes (22k sats); **`set-swap-limit` ⭐** |
 
 ## Sim 9: Repay refund branch (`simul-loan-snpl-repay-refund.js`)
 
@@ -599,6 +604,79 @@ locked in the snpl forever (no admin extraction; the snpl has no
 sweep function). Sim 9 confirms the branch fires correctly with a
 real Jing settlement upstream and routes the excess back to the
 borrower as the only legitimate beneficiary.
+
+---
+
+## Sim 10: set-swap-limit relay (`simul-loan-snpl-set-swap-limit.js`)
+
+The first sim to exercise `snpl.set-swap-limit`. The snpl wraps Jing's
+`set-sbtc-limit` in an empty `as-contract?` block — when the borrower
+calls `set-swap-limit(loan-id, new-limit)`, the snpl updates its loan
+record's `limit-price` field then forwards via as-contract to Jing. This
+is the only stxer-feasible way to verify Jing v2's `set-sbtc-limit`
+accepts a relayed call from a contract depositor (the snpl is recorded
+as the cycle-8 depositor via the original `deposit-sbtc` tx, also done
+under as-contract).
+
+```bash
+npx tsx simulations/simul-loan-snpl-set-swap-limit.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/3b35937fad682a0845cc77d2974fe032
+
+### Flow
+
+```
+[deploy + init + seed + supply + open-line + borrow + swap-deposit at LIMIT_INITIAL]
+BORROWER.set-swap-limit(1, LIMIT_BUMPED)
+  -> snpl maps-set loan { limit-price: LIMIT_BUMPED }
+  -> snpl as-contract? -> Jing.set-sbtc-limit(LIMIT_BUMPED)
+  -> Jing emits (event "set-sbtc-limit" (depositor snpl) (limit LIMIT_BUMPED))
+BORROWER.cancel-swap(1)                [no economic change vs Sim 1]
+BORROWER.repay(1, reserve)             [standard flow]
+LENDER.withdraw-sbtc(22.198M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 12 | Initial `swap-deposit` records limit `u31152648000000` on both snpl loan record and Jing's depositor metadata |
+| 13 | `(get-loan u1)` shows `limit-price u31152648000000` |
+| 15 | `set-swap-limit(1, u32000000000000)`: **`(ok true)`** with TWO events — Jing's `set-sbtc-limit` log (`depositor = snpl`, `limit u32000000000000`) and snpl's own `set-swap-limit` print event |
+| 16 | `(get-loan u1)` AFTER set-swap-limit: `limit-price u32000000000000` ← snpl's `map-set` ran cleanly; loan record is in sync with Jing's stored limit |
+| 17 | `cancel-swap`: real `refund-sbtc u22000000` from Jing → snpl, normal flow (proves no state desync from the limit change) |
+| 18 | `repay`: standard 3-transfer flow (220k borrower→snpl, 22k snpl→JING_TREASURY, 22.198M snpl→reserve), `fee-sbtc u22000`, `lender-payoff-sbtc u22198000`, `stx-released u0` |
+| 19 | Final loan record persists `limit-price u32000000000000` and `status u1` REPAID — the bumped value is what stays as on-chain history |
+| 23 | LENDER end at `u23198000` (+198k net) — unchanged from Sim 1, confirming the limit relay has no economic side-effects on the cancel-swap path |
+
+### Real-world significance
+
+`set-swap-limit` is the only mutation path for an active Jing position
+short of canceling the entire deposit. In production, a borrower might
+want to bump their limit if the auction's clearing price is moving
+away from their original floor (limit too low → STX side won't cross,
+sBTC rolls indefinitely). Without this relay, the only recourse would
+be `cancel-swap` + redeposit — which costs gas and creates a window
+where the snpl's sBTC sits idle.
+
+Jing's `set-sbtc-limit` requires `tx-sender` to match the cycle's
+existing depositor record. Since the snpl deposited under as-contract
+(making the snpl the depositor of record), the relay must also fire
+under as-contract — which is exactly what the snpl does. This sim
+confirms that Jing's depositor-recognition and the snpl's as-contract
+context are compatible across the original deposit and the limit
+update.
+
+### Stxer-mode tweak required mid-sim
+
+The first run failed at step 15 with `(err u110)` ERR-PAST-DEADLINE.
+The stxer copy had only commented out the deadline gate in
+`swap-deposit` (line 185); the equivalent gate in `set-swap-limit`
+(line 224) was still active and tripped immediately under `CLAWBACK-
+DELAY u0`. Fix was to comment out line 224 too — symmetric stxer
+accommodation. Production keeps both checks; deadline enforcement on
+both paths is clarinet's responsibility.
 
 ---
 
