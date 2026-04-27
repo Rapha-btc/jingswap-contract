@@ -523,6 +523,7 @@ Sim 8 confirms option 1 works end-to-end with no manual state cleanup.
 | Reborrow after seize | 8 | 1 | 1 | 2 | cancel-swap stand-in (both) | n/a | 0 | u0 | borrower | yes on loan 2 only (22k) |
 | Repay refund branch | 9 | 1 | 1 | 1 | close-and-settle | STX | 60.04M sats | u135352658451 ✓ | borrower | yes (100k — scales with 100M loan); **refund branch ⭐** |
 | set-swap-limit relay | 10 | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 | borrower | yes (22k sats); **`set-swap-limit` ⭐** |
+| Multi-snpl real settle | 11 | 2 | 1 | 2 (1 ea) | close-and-settle | STX | 30.06M sats × 2 | u67676329225 × 2 | borrower (each) | yes on both repays (100k total); **per-depositor symmetry ⭐** |
 
 ## Sim 9: Repay refund branch (`simul-loan-snpl-repay-refund.js`)
 
@@ -677,6 +678,82 @@ The stxer copy had only commented out the deadline gate in
 DELAY u0`. Fix was to comment out line 224 too — symmetric stxer
 accommodation. Production keeps both checks; deadline enforcement on
 both paths is clarinet's responsibility.
+
+---
+
+## Sim 11: Multi-snpl with real Jing settle (`simul-loan-snpl-multi-real-settle.js`)
+
+Sim 5 demonstrated multi-snpl with synthetic cancel-swap. This
+companion lets Jing actually settle with both snpls deposited as
+distinct depositors in the same cycle. Two snpls deposit 50M sats
+each at the same limit-price; real `close-and-settle-with-refresh`
+runs; Jing's `distribute-sbtc-depositor` fires once per depositor.
+Borrowers each cancel-swap their own rolled portion, then each
+repay independently using the same shared reserve.
+
+Demonstrates that Jing v2 handles two contract-controlled depositors
+with **mathematically identical** per-principal accounting — both
+snpls receive the same sBTC-rolled and stx-received amounts down to
+the sat, proving zero cross-contamination at the distribution layer.
+
+```bash
+npx tsx simulations/simul-loan-snpl-multi-real-settle.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/bcfd35fe911fe9c77af89c9052e9e556
+
+### Flow
+
+```
+LENDER deploys reserve-trait, snpl-trait, loan-reserve, snpl-A, snpl-B
+LENDER initializes all three; SBTC_WHALE seeds LENDER + both borrowers
+LENDER supply 100M, open-credit-line(snpl-A, 50M, 100bps), open(snpl-B, 50M, 100bps)
+BORROWER_A.borrow(50M) on snpl-A     |    BORROWER_B.borrow(50M) on snpl-B
+BORROWER_A.swap-deposit(1)            |    BORROWER_B.swap-deposit(1)
+LENDER -> Jing.close-and-settle-with-refresh(VAA)
+  -> binding-side "stx", both snpls receive identical 67.68k STX,
+     both roll identical 30.06M sats into N+1
+BORROWER_A.cancel-swap                |    BORROWER_B.cancel-swap
+  -> each refunds their own 30.06M from cycle 9
+BORROWER_A.repay(reserve)             |    BORROWER_B.repay(reserve)
+  -> identical 4-transfer flows: 20.44M topup + 50k fee + 50.45M
+     lender-payoff + 67.68k STX release
+LENDER.withdraw-sbtc(100.9M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 19 | Cycle pre-settle totals: `total-sbtc u100192927` (our 100M + 192927 from a mainnet depositor), `total-stx u136627296612` (mainnet only) |
+| 20 | Settlement event: `binding-side "stx"`, `clearing-price u33971470165002`, `sbtc-cleared u39882921`, `sbtc-unfilled u60117079` |
+| 20 events [15-18] | **Two `distribute-sbtc-depositor` events with byte-identical amounts**: snpl-A `sbtc-rolled u30058539, stx-received u67676329225`; snpl-B `sbtc-rolled u30058539, stx-received u67676329225` ← per-depositor symmetry proof |
+| 21-26 | Per-snpl post-settle balances: identical STX `u67676329225` each, identical sBTC `u0` each, identical Jing-rolled `u30058539` each |
+| 27, 28 | Two cancel-swaps in cycle 9: each `refund-sbtc u30058539` to their own snpl, no cross-interference |
+| 32, 33 | Two repays with **identical** print events: `delta-sbtc u20441461`, `fee-sbtc u50000`, `lender-payoff-sbtc u50450000`, `stx-released u67676329225`, `is-shortfall true` |
+| 32, 33 events | Each repay tx: 4 transfers (borrower-shortfall + JING_TREASURY-fee + reserve-payoff + STX-release-to-borrower), mirror-image on both snpls |
+| 34, 35 | Final loan records byte-identical except for the borrower principal: same `position-stx u67676329225`, same `status u1` REPAID |
+| 40, 41 | Both credit lines: `outstanding-sbtc u0`, independent map entries |
+| 42 | Reserve sBTC after both repays: `u100900000` = 50.45M × 2 ✓ |
+| 43 vs 31 | JING_TREASURY: `u385898 → u485898` = **exactly +100k** (50k × 2 fees) |
+| 46 | LENDER end: `u110900000` = +900k net (= 50.45M × 2 − 100M supply) |
+
+### Why this matters
+
+Sim 5 proved per-snpl isolation in the **reserve's** credit-line map.
+Sim 11 proves the same isolation property at the **Jing layer** —
+when two contract-controlled depositors share a cycle, Jing's
+distribute-sbtc-depositor fires once per principal with identical
+math (when inputs are identical) and zero state-bleed across calls.
+
+The mainnet implication: a lender funding multiple snpls with the
+same source can confidently let multiple borrowers settle in the
+same Jing cycle. Each snpl's outcome (filled vs rolled, STX
+received) depends only on that snpl's deposit + cycle-wide clearing
+math, never on what the other snpls did. This is a load-bearing
+property for the canonical-bytecode design — without it, the lender
+would need to coordinate borrower deposit windows or use one snpl
+per cycle.
 
 ---
 
