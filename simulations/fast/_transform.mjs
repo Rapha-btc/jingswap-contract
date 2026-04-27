@@ -26,22 +26,25 @@ for (const f of files) {
     .replace(/-/g, " ")
     .toUpperCase();
 
-  // 1) Add verifier + expectations imports right after the stxer import.
+  // 1) Add verifier + expectations + block-pins imports right after stxer.
   code = code.replace(
     /import \{ SimulationBuilder \} from "stxer";\n/,
-    `import { SimulationBuilder } from "stxer";\nimport { verifyAndReport } from "./_verify.js";\nimport { expectations } from "./_expectations.js";\n`
+    `import { SimulationBuilder } from "stxer";\nimport { verifyAndReport } from "./_verify.js";\nimport { expectations } from "./_expectations.js";\nimport { blockPins } from "./_block-pins.js";\n`
   );
 
-  // 2) Enable skip_tracing on the builder.
+  // 2) Enable skip_tracing AND pin to the README's historical block height
+  //    (so verifier tests contract behavior, not current chain balances).
+  const scriptKeyForPin = f.replace(/\.js$/, "");
   code = code.replace(
     /SimulationBuilder\.new\(\)/,
-    "SimulationBuilder.new({ skipTracing: true })"
+    `SimulationBuilder.new({ skipTracing: true })\n    .useBlockHeight(blockPins[${JSON.stringify(scriptKeyForPin)}].block_height)`
   );
 
   // 3) Replace the two trailing console.log lines with a verifier call.
+  const scriptKey = f.replace(/\.js$/, "");
   code = code.replace(
     /  console\.log\(`\\nSimulation submitted!`\);\n  console\.log\(`View results: https:\/\/stxer\.xyz\/simulations\/mainnet\/\$\{sessionId\}`\);\n/,
-    `  console.log(\`\\nSession: \${sessionId}\`);\n  const _verify = await verifyAndReport(sessionId, ${JSON.stringify(label)});\n  if (!_verify.passed) process.exit(1);\n`
+    `  console.log(\`\\nSession: \${sessionId}\`);\n  const _verify = await verifyAndReport(sessionId, ${JSON.stringify(label)}, expectations[${JSON.stringify(scriptKey)}] || {});\n  if (!_verify.passed) process.exit(1);\n`
   );
 
   // 4) Make the top-level catch exit non-zero so the runner can detect failures.

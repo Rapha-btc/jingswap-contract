@@ -22,6 +22,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 // --- Principals ---
 const LENDER = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
@@ -53,6 +55,7 @@ async function main() {
   console.log("fund → borrow → swap-deposit → cancel-swap → topup → repay\n");
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-jing-loan-sbtc-stx-single"].block_height)
     // 1. Deploy as LENDER (so deployed contract ID matches the LENDER constant)
     .withSender(LENDER)
     .addContractDeploy({
@@ -156,7 +159,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "JING LOAN SBTC STX SINGLE");
+  const _verify = await verifyAndReport(sessionId, "JING LOAN SBTC STX SINGLE", expectations["simul-jing-loan-sbtc-stx-single"] || {});
   if (!_verify.passed) process.exit(1);
 }
 

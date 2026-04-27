@@ -31,20 +31,16 @@ const ACCEPT_PATTERNS = [
 
 function extractClarity(resultCell) {
   // Result cell might be: `` `(ok u1)` — loan 1 created, deadline `u945975` ``
-  // We want to capture the FIRST backticked Clarity expression that matches our
-  // accept list. Skip prose after the first em-dash or comma.
-  const trimmed = resultCell.trim();
+  // or with markdown emphasis: `` **`(err u103)`** ERR-INSUFFICIENT-FUNDS ``.
+  // We strip leading markdown emphasis (** or *) and match the first
+  // backticked Clarity expression that fits an accepted pattern.
+  let trimmed = resultCell.trim().replace(/^\*+\s*/, "");
 
-  // Special-case bare "Success" for deploys (no backticks).
   if (/^Success\b/i.test(trimmed)) return "Success";
 
-  // Try the patterns in order; capture the first matching backticked token.
   for (const re of ACCEPT_PATTERNS) {
     const m = trimmed.match(re);
-    if (m) {
-      // Strip leading/trailing backticks
-      return m[0].replace(/^`|`$/g, "");
-    }
+    if (m) return m[0].replace(/^`|`$/g, "");
   }
   return null;
 }
@@ -66,12 +62,17 @@ function parseReadme(file) {
     let m;
     while ((m = rowRe.exec(section)) !== null) {
       const stepNum1 = parseInt(m[1], 10);
-      const idx0 = stepNum1 - 1; // README is 1-indexed; our verifier is 0-indexed.
+      const idx0 = stepNum1 - 1;
+      const actionCell = m[2];
       const resultCell = m[3];
+
+      // Skip rows whose Action column ends with " status" or " field" — those
+      // describe a sub-field of a tuple-returning call (e.g. `(get-loan u1) status`),
+      // not the full call result. Strict comparison would mismatch the wrapping tuple.
+      if (/\s+(status|field)\s*$/.test(actionCell.trim())) continue;
+
       const expected = extractClarity(resultCell);
-      if (expected !== null) {
-        expects[idx0] = expected;
-      }
+      if (expected !== null) expects[idx0] = expected;
     }
     if (Object.keys(expects).length > 0) {
       result[scriptName] = expects;

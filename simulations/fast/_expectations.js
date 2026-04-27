@@ -40,7 +40,6 @@ export const expectations = {
     "11": "u22000000",
     "13": "u5000000000",
     "14": "(ok true)",
-    "15": "u3",
     "16": "none",
     "19": "u22347353",
     "20": "u5001000000"
@@ -51,7 +50,10 @@ export const expectations = {
     "6": "(ok true)",
     "8": "(ok true)",
     "10": "(ok u1)",
-    "18": "(ok true)"
+    "13": "(err u103)",
+    "15": "(err u100)",
+    "18": "(ok true)",
+    "20": "u30000000"
   },
   "simul-jing-loan-set-swap-limit": {
     "9": "(err u101)",

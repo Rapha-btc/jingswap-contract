@@ -27,6 +27,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 const LENDER = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
 const BORROWER = "SP3KJBWTS3K562BF5NXWG5JC8W90HEG7WPYH5B97X";
@@ -57,6 +59,7 @@ async function main() {
   console.log("Proves active-loan and next-loan-id reset correctly after seize.\n");
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-jing-loan-reborrow-after-seize"].block_height)
     .withSender(LENDER)
     .addContractDeploy({
       contract_name: CONTRACT_NAME,
@@ -174,7 +177,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "JING LOAN REBORROW AFTER SEIZE");
+  const _verify = await verifyAndReport(sessionId, "JING LOAN REBORROW AFTER SEIZE", expectations["simul-jing-loan-reborrow-after-seize"] || {});
   if (!_verify.passed) process.exit(1);
 }
 

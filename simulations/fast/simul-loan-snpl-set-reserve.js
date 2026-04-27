@@ -37,6 +37,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 // --- Principals ---
 const LENDER_A = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
@@ -92,6 +94,7 @@ async function main() {
   console.log("Borrower repays loan 1 on reserve-A, switches, repays loan 2 on reserve-B\n");
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-loan-snpl-set-reserve"].block_height)
     // ------- Deploy traits + snpl + reserve-A (LENDER_A) -------
     .withSender(LENDER_A)
     .addContractDeploy({
@@ -383,7 +386,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "LOAN SNPL SET RESERVE");
+  const _verify = await verifyAndReport(sessionId, "LOAN SNPL SET RESERVE", expectations["simul-loan-snpl-set-reserve"] || {});
   if (!_verify.passed) process.exit(1);
 }
 

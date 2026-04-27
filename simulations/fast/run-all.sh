@@ -61,6 +61,10 @@ for script in "${SCRIPTS[@]}"; do
     rc=$?
   fi
 
+  # Brief pause between scripts to avoid Hiro REST API rate-limiting on the
+  # Pyth-VAA fetches in the snpl real-settle scripts.
+  sleep 2
+
   if grep -q "RESULT: PASS-WITH-CERR" "$log"; then
     result=$(grep -E "^Steps:" "$log" | tail -1)
     printf "CERR  (%s)\n" "${result#*Steps:}"

@@ -26,6 +26,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 const LENDER = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
 const BORROWER = "SP3KJBWTS3K562BF5NXWG5JC8W90HEG7WPYH5B97X";
@@ -63,6 +65,7 @@ async function main() {
   console.log("Two consecutive happy-path loans on the same snpl + reserve\n");
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-loan-snpl-rollover"].block_height)
     .withSender(LENDER)
     .addContractDeploy({ contract_name: RESERVE_TRAIT_NAME, source_code: reserveTraitSrc, clarity_version: ClarityVersion.Clarity4 })
     .addContractDeploy({ contract_name: SNPL_TRAIT_NAME, source_code: snplTraitSrc, clarity_version: ClarityVersion.Clarity4 })
@@ -179,7 +182,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "LOAN SNPL ROLLOVER");
+  const _verify = await verifyAndReport(sessionId, "LOAN SNPL ROLLOVER", expectations["simul-loan-snpl-rollover"] || {});
   if (!_verify.passed) process.exit(1);
 }
 

@@ -38,6 +38,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 // --- Principals ---
 const LENDER = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
@@ -142,6 +144,7 @@ async function main() {
   );
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-loan-snpl-seize-rolled"].block_height)
     // ------- Deploy -------
     .withSender(LENDER)
     .addContractDeploy({
@@ -335,7 +338,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "LOAN SNPL SEIZE ROLLED");
+  const _verify = await verifyAndReport(sessionId, "LOAN SNPL SEIZE ROLLED", expectations["simul-loan-snpl-seize-rolled"] || {});
   if (!_verify.passed) process.exit(1);
 }
 

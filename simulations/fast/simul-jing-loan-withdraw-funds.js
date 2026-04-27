@@ -18,6 +18,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 const LENDER = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
 const BORROWER = "SP3KJBWTS3K562BF5NXWG5JC8W90HEG7WPYH5B97X";
@@ -47,6 +49,7 @@ async function main() {
   console.log("active-loan protection (borrowed principal not withdrawable)\n");
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-jing-loan-withdraw-funds"].block_height)
     // Deploy
     .withSender(LENDER)
     .addContractDeploy({
@@ -155,7 +158,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "JING LOAN WITHDRAW FUNDS");
+  const _verify = await verifyAndReport(sessionId, "JING LOAN WITHDRAW FUNDS", expectations["simul-jing-loan-withdraw-funds"] || {});
   if (!_verify.passed) process.exit(1);
 }
 

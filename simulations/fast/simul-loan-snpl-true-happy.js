@@ -45,6 +45,8 @@ import {
 } from "@stacks/transactions";
 import { SimulationBuilder } from "stxer";
 import { verifyAndReport } from "./_verify.js";
+import { expectations } from "./_expectations.js";
+import { blockPins } from "./_block-pins.js";
 
 // --- Principals ---
 const LENDER = "SP3TACXQF9X25NETDNQ710RMQ7A8AHNTF7XVG252M";
@@ -146,6 +148,7 @@ async function main() {
   console.log("  -> tests STX-release branch in repay (stx-out -> borrower)\n");
 
   const sessionId = await SimulationBuilder.new({ skipTracing: true })
+    .useBlockHeight(blockPins["simul-loan-snpl-true-happy"].block_height)
     .withSender(LENDER)
     .addContractDeploy({
       contract_name: RESERVE_TRAIT_NAME,
@@ -358,7 +361,7 @@ async function main() {
     .run();
 
   console.log(`\nSession: ${sessionId}`);
-  const _verify = await verifyAndReport(sessionId, "LOAN SNPL TRUE HAPPY");
+  const _verify = await verifyAndReport(sessionId, "LOAN SNPL TRUE HAPPY", expectations["simul-loan-snpl-true-happy"] || {});
   if (!_verify.passed) process.exit(1);
 }
 
