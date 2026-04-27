@@ -91,6 +91,7 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
     (try! (contract-call? SBTC transfer amount tx-sender current-contract none))
+    (try! (contract-call? .jing-core log-deposit "sbtc" amount))
     (print { event: "supply", amount: amount })
     (ok true)))
 
@@ -99,6 +100,7 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? SBTC transfer amount current-contract (var-get lender) none))))
+    (try! (contract-call? .jing-core log-withdraw "sbtc" amount))
     (print { event: "withdraw-sbtc", amount: amount })
     (ok true)))
 

@@ -68,6 +68,13 @@
 (define-read-only (get-total-token-equity (token principal))
   (default-to u0 (map-get? total-token-equity token)))
 
+;; Zest-shaped read-only for the dual-stacking-boost cross-checks.
+;; Aggregates user's total sBTC equity across all approved markets +
+;; registered vaults (and reserves once their reserve principal is
+;; mapped in vault-owners).
+(define-read-only (get-balance (user principal))
+  (ok (get-token-equity SBTC_TOKEN user)))
+
 ;; ----- Private equity helpers -----
 
 (define-private (credit (token principal) (who principal) (amount uint))
