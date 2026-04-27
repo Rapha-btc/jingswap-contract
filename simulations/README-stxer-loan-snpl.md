@@ -524,6 +524,7 @@ Sim 8 confirms option 1 works end-to-end with no manual state cleanup.
 | Repay refund branch | 9 | 1 | 1 | 1 | close-and-settle | STX | 60.04M sats | u135352658451 ✓ | borrower | yes (100k — scales with 100M loan); **refund branch ⭐** |
 | set-swap-limit relay | 10 | 1 | 1 | 1 | cancel-swap stand-in | n/a | 0 | u0 | borrower | yes (22k sats); **`set-swap-limit` ⭐** |
 | Multi-snpl real settle | 11 | 2 | 1 | 2 (1 ea) | close-and-settle | STX | 30.06M sats × 2 | u67676329225 × 2 | borrower (each) | yes on both repays (100k total); **per-depositor symmetry ⭐** |
+| Re-deposit same loan | 12 | 1 | 1 | 1 (with 2 swap-deposits) | cancel-swap stand-in (×2) | n/a | 0 | u0 | borrower | yes (22k sats); **swap-deposit idempotency ⭐** |
 
 ## Sim 9: Repay refund branch (`simul-loan-snpl-repay-refund.js`)
 
@@ -754,6 +755,79 @@ math, never on what the other snpls did. This is a load-bearing
 property for the canonical-bytecode design — without it, the lender
 would need to coordinate borrower deposit windows or use one snpl
 per cycle.
+
+---
+
+## Sim 12: Re-deposit after cancel-swap (`simul-loan-snpl-redeposit.js`)
+
+Proves that `swap-deposit` can be called multiple times on the same
+loan: borrower deposits at LIMIT_INITIAL, cancel-swaps to recover the
+sBTC to the snpl, then RE-deposits the same notional at LIMIT_BUMPED.
+The snpl's loan record's `limit-price` (and `jing-cycle`) are
+overwritten via `map-set` on each call; Jing accepts a fresh deposit
+from the same depositor without complaining about a stale prior
+deposit (since the cancel-swap cleared their slot first).
+
+After the re-deposit, borrower cancel-swaps again and repays normally.
+Final loan record reflects the LAST `swap-deposit`'s limit-price.
+
+```bash
+npx tsx simulations/simul-loan-snpl-redeposit.js
+```
+
+**Stxer**: https://stxer.xyz/simulations/mainnet/344886804a2048c20e0eed082ed499ad
+
+### Flow
+
+```
+[deploy + init + seed + supply + open-line + borrow]
+BORROWER.swap-deposit(1, LIMIT_INITIAL)    [first deposit]
+BORROWER.cancel-swap(1)                    [recover to snpl]
+BORROWER.swap-deposit(1, LIMIT_BUMPED)     [RE-DEPOSIT ⭐]
+BORROWER.cancel-swap(1)                    [recover again]
+BORROWER.repay(1, reserve)                 [standard close]
+LENDER.withdraw-sbtc(22.198M)
+```
+
+### Key proof points
+
+| Step | Evidence |
+|---|---|
+| 12 | First `swap-deposit`: Jing event `(limit u31152648000000)`, snpl print `(limit u31152648000000) (loan-id u1)` |
+| 13 | Loan record: `limit-price u31152648000000`, `jing-cycle u8` |
+| 14 | First `cancel-swap`: Jing `refund-sbtc 22M` → snpl |
+| 15 | Snpl sBTC after cancel: `u22000000` (recovered) |
+| **16** | **Re-deposit `(ok true)`** ← Jing accepts a second deposit from the same depositor, no stale-state error. Jing event `(limit u32000000000000)`, snpl print `(limit u32000000000000) (loan-id u1)` (same loan-id) |
+| 17 | Loan record AFTER re-deposit: `limit-price u32000000000000` ← **overwrote** LIMIT_INITIAL via the snpl's `map-set` inside `swap-deposit` |
+| 18 | Snpl sBTC after re-deposit: `u0` (re-deposited into Jing) |
+| 19 | Jing's `get-sbtc-deposit(cycle 8, snpl)` = `u22000000` (fresh slot) |
+| 20–21 | Second cancel-swap recovers 22M again, snpl sBTC `u22000000` |
+| 22 | Repay: standard 3 FT_TRANSFERs + notify-return, `is-shortfall true`, `fee-sbtc u22000` |
+| 23 | Final loan record: `limit-price u32000000000000` retained as last-set value, `status u1` REPAID |
+| 27 | LENDER end: `u23198000` (+198k net, same as Sim 1) |
+
+### Comparison with Sim 10 (`set-swap-limit`)
+
+Both sims achieve the **same end state** — loan record now shows
+`limit-price u32000000000000` and Jing's stored limit matches — but
+via different transaction patterns:
+
+| Path | Tx count | Runtime cost | Side effect |
+|---|---|---|---|
+| Sim 10: `set-swap-limit` | 1 tx | ~91k runtime | Jing's existing deposit slot is updated in place |
+| Sim 12: cancel + re-deposit | 2 txs (cancel + deposit) | ~330k+ runtime combined | Jing's slot is destroyed and recreated; sBTC briefly transits through snpl |
+
+`set-swap-limit` is the production-preferred path for limit changes
+on active deposits. Re-deposit is the fallback for cases where the
+borrower wants to *also* reset the cycle (only effectively the same
+cycle in stxer's single-block mode here; in production the second
+deposit would land in cycle N+1 if the deposit phase has closed and
+re-opened between calls).
+
+Both paths converge on identical loan-record state. The snpl's
+`map-set loans loan-id (merge loan { limit-price ... })` works
+correctly under both invocations — proving idempotency of the loan
+record update under repeated mutations.
 
 ---
 
