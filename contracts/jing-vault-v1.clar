@@ -159,7 +159,7 @@
 ;; cycle -- outside that window the underlying call reverts and no state
 ;; changes here.
 
-(define-public (cancel-jing-stx)
+(define-public (cancel-jing-stx) ;; amount is returned in signature = use for accounting? and/or in the print logs
   (begin
     (asserts! (or (is-eq tx-sender OWNER)
                   (is-eq (some tx-sender) (var-get keeper)))
@@ -210,7 +210,8 @@
         (asserts! false ERR_INVALID_SIDE)))
     (try! (contract-call? .jing-core log-jing-deposit
       msg-hash side amount limit-price))
-    (ok msg-hash)))
+    (ok msg-hash)));; we assert out on expiry here right
+    ;; we can call close deposit and settle with refresh, all in 1 tsx
 
 ;; Execute a signed Bitflow swap intent. min-out is derived on-chain from
 ;; (amount, limit-price) so the owner signs a price policy, not a raw
@@ -259,7 +260,7 @@
         (asserts! false ERR_INVALID_SIDE)))
     (try! (contract-call? .jing-core log-bitflow-swap
       msg-hash side amount limit-price min-out))
-    (ok msg-hash)))
+    (ok msg-hash)));; 1/ what about dlmm 2/ assert out on expiry
 
 ;; ---------------------------------------------------------------
 ;; Internal helpers

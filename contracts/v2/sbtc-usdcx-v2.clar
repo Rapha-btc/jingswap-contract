@@ -79,7 +79,7 @@
 ;; Per-call caller outcome snapshot. Populated during distribute-to-* when the
 ;; iterated depositor matches tx-sender, so settle can return the caller's fill
 ;; in its response tuple and enable atomic DeFi composition. `cleared` is
-;; omitted — the caller already knows its own deposit and can derive it.
+;; omitted - the caller already knows its own deposit and can derive it.
 (define-data-var caller-sbtc-received uint u0)
 (define-data-var caller-usdcx-rolled uint u0)
 (define-data-var caller-usdcx-received uint u0)
