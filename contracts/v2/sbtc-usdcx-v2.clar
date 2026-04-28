@@ -39,6 +39,14 @@
 (define-data-var token-y principal SAINT)
 (define-data-var initialized bool false)
 
+;; Precomputed at init from token decimals: 10^(16 + x_dec - y_dec). Used as
+;; numerator of (/ dlmm-rescale raw-bin-price) to invert DLMM bin-price into
+;; the same scale as oracle-price. Derivation: target * raw = oracle_scale *
+;; dlmm_scale * 10^(x_dec - y_dec); with oracle_scale = 1e8 (Pyth) and
+;; dlmm_scale = 1e8 (DLMM internal). Decimals themselves are not stored --
+;; off-chain consumers can read them from the token contracts directly.
+(define-data-var dlmm-rescale uint u0)
+
 (define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
 (define-constant ERR_NOT_DEPOSIT_PHASE (err u1002))
 (define-constant ERR_NOT_SETTLE_PHASE (err u1003))
@@ -57,6 +65,7 @@
 (define-constant ERR_LIMIT_REQUIRED (err u1017))
 (define-constant ERR_ALREADY_INITIALIZED (err u1018))
 (define-constant ERR_WRONG_TRAIT (err u1019))
+(define-constant ERR_BAD_DECIMALS (err u1020))
 
 (define-data-var treasury principal tx-sender)
 (define-data-var operator principal tx-sender)
@@ -168,6 +177,9 @@
 
 (define-read-only (get-token-y-limit (depositor principal))
   (default-to u0 (map-get? token-y-deposit-limits depositor)))
+
+(define-read-only (get-dlmm-rescale)
+  (var-get dlmm-rescale))
 
 (define-read-only (get-token-x-limit (depositor principal))
   (default-to u0 (map-get? token-x-deposit-limits depositor)))
@@ -879,28 +891,34 @@
     get-pool))))
     (/ (* (get y-balance pool) u100 PRICE_PRECISION) (get x-balance pool))))
 
-;; NOTE: Unlike token-x-stx-0-v2 (which inverts via 1e18/bin-price), the
-;; token-x/token-y DLMM pool has not been re-scale-audited here. Before flipping
-;; dex-source to DLMM, verify bin-price units match the BTC/USD * 1e8 oracle
-;; scale. See contracts/v2/README-dlmm-price-bug.md for the derivation.
+;; Inverts DLMM raw bin-price into the same scale as oracle-price using
+;; `dlmm-rescale` (precomputed at init from token decimals).
+;; For sBTC/USDCx (x=sBTC 8dp, y=USDCx 6dp): rescale = 1e18.
+;; See contracts/v2/README-dlmm-price-bug.md for the derivation.
 (define-read-only (get-dlmm-price)
   (let ((pool (unwrap-panic (contract-call?
     'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10
-    get-pool))))
-    (unwrap-panic (contract-call?
-      'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
-      get-bin-price (get initial-price pool) (get bin-step pool) (get active-bin-id pool)))))
+    get-pool)))
+        (bin-price (unwrap-panic (contract-call?
+          'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
+          get-bin-price (get initial-price pool) (get bin-step pool) (get active-bin-id pool)))))
+    (/ (var-get dlmm-rescale) bin-price)))
 
 (define-public (initialize
   (x principal) (y principal)
-  (min-x uint) (min-y uint))
+  (min-x uint) (min-y uint)
+  (x-decimals uint) (y-decimals uint))
   (begin
     (asserts! (is-eq tx-sender (var-get operator)) ERR_NOT_AUTHORIZED)
     (asserts! (not (var-get initialized)) ERR_ALREADY_INITIALIZED)
+    ;; x-decimals must be >= y-decimals so (- x-decimals y-decimals) doesn't
+    ;; underflow when computing dlmm-rescale. Pair the higher-decimal token as x.
+    (asserts! (>= x-decimals y-decimals) ERR_BAD_DECIMALS)
     (var-set token-x x)
     (var-set token-y y)
     (var-set min-token-x-deposit min-x)
     (var-set min-token-y-deposit min-y)
+    (var-set dlmm-rescale (pow u10 (+ u16 (- x-decimals y-decimals))))
     (var-set initialized true)
     (ok true)))
 
