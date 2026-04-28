@@ -1,6 +1,8 @@
-;; token-x-token-y-jing-v2 with limit-pricing (ported from token-x-stx v1->v2 diff).
-;; Oracle-price is BTC/USD from Pyth (8-dec), same unit as user-supplied limit.
-;; STX feed is only used (and validated) when dex-source is XYK.
+;; Generic blind-batch auction template for an FT pair against a Pyth feed.
+;; Oracle-price comes from a single Pyth feed (configured at init), 8-dec
+;; scale, same unit as the user-supplied limit-price. No DEX-divergence
+;; sanity check -- depositors are protected by their own limit-price + Pyth's
+;; confidence/staleness gates. See README-dex-sanity-removal.md.
 (use-trait pyth-storage-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.storage-trait)
 (use-trait pyth-decoder-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-traits-v2.decoder-trait)
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
@@ -20,17 +22,11 @@
 
 (define-constant DECIMAL_FACTOR u100)
 
-(define-constant BTC_USD_FEED 0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43)
-(define-constant STX_USD_FEED 0xec7a775f46379b5e943c3526b1c8d54cd49749176b0b98e02dde68d1bd335c17)
-
 (define-constant MAX_STALENESS u999999999)
 (define-constant MAX_CONF_RATIO u50)
-(define-constant MAX_DEX_DEVIATION u10)
-
-(define-constant DEX_SOURCE_XYK u1)
-(define-constant DEX_SOURCE_DLMM u2)
 
 (define-constant SAINT 'SP000000000000000000002Q6VF78)
+(define-constant SAINT_FEED 0x0000000000000000000000000000000000000000000000000000000000000000)
 
 ;; Token pair -- passed to jing-core on every log-* call so the registry
 ;; can aggregate across markets without hard-coding assets. Set once via
@@ -39,13 +35,10 @@
 (define-data-var token-y principal SAINT)
 (define-data-var initialized bool false)
 
-;; Precomputed at init from token decimals: 10^(16 + x_dec - y_dec). Used as
-;; numerator of (/ dlmm-rescale raw-bin-price) to invert DLMM bin-price into
-;; the same scale as oracle-price. Derivation: target * raw = oracle_scale *
-;; dlmm_scale * 10^(x_dec - y_dec); with oracle_scale = 1e8 (Pyth) and
-;; dlmm_scale = 1e8 (DLMM internal). Decimals themselves are not stored --
-;; off-chain consumers can read them from the token contracts directly.
-(define-data-var dlmm-rescale uint u0)
+;; Pyth feed identifier for the base/quote pair this contract clears. Set
+;; once via `initialize`. Lets the same contract template price any pair
+;; (e.g. BTC_USD for sBTC/USDCx, ETH_USD for ETH/USDCx) without recompile.
+(define-data-var oracle-feed (buff 32) SAINT_FEED)
 
 (define-constant ERR_DEPOSIT_TOO_SMALL (err u1001))
 (define-constant ERR_NOT_DEPOSIT_PHASE (err u1002))
@@ -53,7 +46,6 @@
 (define-constant ERR_ALREADY_SETTLED (err u1004))
 (define-constant ERR_STALE_PRICE (err u1005))
 (define-constant ERR_PRICE_UNCERTAIN (err u1006))
-(define-constant ERR_PRICE_DEX_DIVERGENCE (err u1007))
 (define-constant ERR_NOTHING_TO_WITHDRAW (err u1008))
 (define-constant ERR_ZERO_PRICE (err u1009))
 (define-constant ERR_PAUSED (err u1010))
@@ -65,12 +57,10 @@
 (define-constant ERR_LIMIT_REQUIRED (err u1017))
 (define-constant ERR_ALREADY_INITIALIZED (err u1018))
 (define-constant ERR_WRONG_TRAIT (err u1019))
-(define-constant ERR_BAD_DECIMALS (err u1020))
 
 (define-data-var treasury principal tx-sender)
 (define-data-var operator principal tx-sender)
 (define-data-var paused bool false)
-(define-data-var dex-source uint DEX_SOURCE_XYK)
 (define-data-var min-token-y-deposit uint u0)
 (define-data-var min-token-x-deposit uint u0)
 (define-data-var current-cycle uint u0)
@@ -169,17 +159,11 @@
 (define-read-only (get-token-x-depositors (cycle uint))
   (default-to (list) (map-get? token-x-depositor-list cycle)))
 
-(define-read-only (get-dex-source)
-  (var-get dex-source))
-
 (define-read-only (get-min-deposits)
   { min-token-y: (var-get min-token-y-deposit), min-token-x: (var-get min-token-x-deposit) })
 
 (define-read-only (get-token-y-limit (depositor principal))
   (default-to u0 (map-get? token-y-deposit-limits depositor)))
-
-(define-read-only (get-dlmm-rescale)
-  (var-get dlmm-rescale))
 
 (define-read-only (get-token-x-limit (depositor principal))
   (default-to u0 (map-get? token-x-deposit-limits depositor)))
@@ -552,17 +536,14 @@
   (tx-trait <ft-trait>) (tx-name (string-ascii 128))
   (ty-trait <ft-trait>) (ty-name (string-ascii 128)))
   (let (
-    (btc-feed (unwrap! (contract-call?
+    (feed-data (unwrap! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-      get-price BTC_USD_FEED) ERR_ZERO_PRICE))
-    (stx-feed (unwrap! (contract-call?
-      'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-      get-price STX_USD_FEED) ERR_ZERO_PRICE))
+      get-price (var-get oracle-feed)) ERR_ZERO_PRICE))
     (cycle (var-get current-cycle))
   )
     (asserts! (is-eq (contract-of tx-trait) (var-get token-x)) ERR_WRONG_TRAIT)
     (asserts! (is-eq (contract-of ty-trait) (var-get token-y)) ERR_WRONG_TRAIT)
-    (try! (execute-settlement cycle btc-feed stx-feed tx-trait tx-name ty-trait ty-name))
+    (try! (execute-settlement cycle feed-data tx-trait tx-name ty-trait ty-name))
     (var-set acc-token-x-out u0)
     (var-set acc-token-y-out u0)
     (var-set acc-token-y-rolled u0)
@@ -583,8 +564,7 @@
           token-x-rolled: (var-get caller-token-x-rolled) })))
 
 (define-public (settle-with-refresh
-  (btc-vaa (buff 8192))
-  (stx-vaa (buff 8192))
+  (vaa (buff 8192))
   (pyth-storage <pyth-storage-trait>)
   (pyth-decoder <pyth-decoder-trait>)
   (wormhole-core <wormhole-core-trait>)
@@ -595,30 +575,17 @@
     (asserts! (is-eq (contract-of ty-trait) (var-get token-y)) ERR_WRONG_TRAIT)
     (try! (contract-call?
       'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-      verify-and-update-price-feeds btc-vaa
+      verify-and-update-price-feeds vaa
       { pyth-storage-contract: pyth-storage,
         pyth-decoder-contract: pyth-decoder,
         wormhole-core-contract: wormhole-core }))
-    (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
-      (begin
-        (try! (contract-call?
-          'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-oracle-v4
-          verify-and-update-price-feeds stx-vaa
-          { pyth-storage-contract: pyth-storage,
-            pyth-decoder-contract: pyth-decoder,
-            wormhole-core-contract: wormhole-core }))
-        true)
-      true)
     (let (
-      (btc-feed (unwrap! (contract-call?
+      (feed-data (unwrap! (contract-call?
         'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-        get-price BTC_USD_FEED) ERR_ZERO_PRICE))
-      (stx-feed (unwrap! (contract-call?
-        'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.pyth-storage-v4
-        get-price STX_USD_FEED) ERR_ZERO_PRICE))
+        get-price (var-get oracle-feed)) ERR_ZERO_PRICE))
       (cycle (var-get current-cycle))
     )
-      (try! (execute-settlement cycle btc-feed stx-feed tx-trait tx-name ty-trait ty-name))
+      (try! (execute-settlement cycle feed-data tx-trait tx-name ty-trait ty-name))
       (var-set acc-token-x-out u0)
       (var-set acc-token-y-out u0)
       (var-set acc-token-y-rolled u0)
@@ -639,8 +606,7 @@
             token-x-rolled: (var-get caller-token-x-rolled) }))))
 
 (define-public (close-and-settle-with-refresh
-  (btc-vaa (buff 8192))
-  (stx-vaa (buff 8192))
+  (vaa (buff 8192))
   (pyth-storage <pyth-storage-trait>)
   (pyth-decoder <pyth-decoder-trait>)
   (wormhole-core <wormhole-core-trait>)
@@ -648,7 +614,7 @@
   (ty-trait <ft-trait>) (ty-name (string-ascii 128)))
   (begin
     (try! (close-deposits))
-    (settle-with-refresh btc-vaa stx-vaa pyth-storage pyth-decoder wormhole-core
+    (settle-with-refresh vaa pyth-storage pyth-decoder wormhole-core
                          tx-trait tx-name ty-trait ty-name)))
 
 ;; should we do a swap func here: deposit + close + settle with refresh
@@ -676,37 +642,20 @@
 
 (define-private (execute-settlement
   (cycle uint)
-  (btc-feed { price: int, conf: uint, expo: int, ema-price: int,
-              ema-conf: uint, publish-time: uint, prev-publish-time: uint })
-  (stx-feed { price: int, conf: uint, expo: int, ema-price: int,
+  (feed-data { price: int, conf: uint, expo: int, ema-price: int,
               ema-conf: uint, publish-time: uint, prev-publish-time: uint })
   (tx-trait <ft-trait>) (tx-name (string-ascii 128))
   (ty-trait <ft-trait>) (ty-name (string-ascii 128)))
   (let (
-    (btc-price (to-uint (get price btc-feed)))
-    (stx-price (to-uint (get price stx-feed)))
-    (oracle-price btc-price)
-    (dex-price (get-dex-price stx-price))
+    (oracle-price (to-uint (get price feed-data)))
     (min-freshness (- stacks-block-time MAX_STALENESS))
   )
     (asserts! (not (var-get paused)) ERR_PAUSED)
     (asserts! (is-eq (get-cycle-phase) PHASE_SETTLE) ERR_NOT_SETTLE_PHASE)
     (asserts! (is-none (map-get? settlements cycle)) ERR_ALREADY_SETTLED)
-    (asserts! (> btc-price u0) ERR_ZERO_PRICE)
-    (asserts! (> (get publish-time btc-feed) min-freshness) ERR_STALE_PRICE)
-    (asserts! (< (get conf btc-feed) (/ btc-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
-
-    (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
-      (begin
-        (asserts! (> stx-price u0) ERR_ZERO_PRICE)
-        (asserts! (> (get publish-time stx-feed) min-freshness) ERR_STALE_PRICE)
-        (asserts! (< (get conf stx-feed) (/ stx-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
-        true)
-      true)
-
-    (asserts! (< (if (> oracle-price dex-price)
-                    (- oracle-price dex-price) (- dex-price oracle-price))
-                 (/ oracle-price MAX_DEX_DEVIATION)) ERR_PRICE_DEX_DIVERGENCE)
+    (asserts! (> oracle-price u0) ERR_ZERO_PRICE)
+    (asserts! (> (get publish-time feed-data) min-freshness) ERR_STALE_PRICE)
+    (asserts! (< (get conf feed-data) (/ oracle-price MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
 
     (var-set settle-clearing-price oracle-price)
     (map filter-limit-violating-token-y-depositor (get-token-y-depositors cycle))
@@ -880,45 +829,18 @@
             (var-get token-x) (var-get token-y)))
     (ok true)))
 
-(define-read-only (get-dex-price (stx-price uint))
-  (if (is-eq (var-get dex-source) DEX_SOURCE_XYK)
-    (/ (* (get-xyk-price) stx-price) PRICE_PRECISION)
-    (get-dlmm-price)))
-
-(define-read-only (get-xyk-price)
-  (let ((pool (unwrap-panic (contract-call?
-    'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1
-    get-pool))))
-    (/ (* (get y-balance pool) u100 PRICE_PRECISION) (get x-balance pool))))
-
-;; Inverts DLMM raw bin-price into the same scale as oracle-price using
-;; `dlmm-rescale` (precomputed at init from token decimals).
-;; For sBTC/USDCx (x=sBTC 8dp, y=USDCx 6dp): rescale = 1e18.
-;; See contracts/v2/README-dlmm-price-bug.md for the derivation.
-(define-read-only (get-dlmm-price)
-  (let ((pool (unwrap-panic (contract-call?
-    'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10
-    get-pool)))
-        (bin-price (unwrap-panic (contract-call?
-          'SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1
-          get-bin-price (get initial-price pool) (get bin-step pool) (get active-bin-id pool)))))
-    (/ (var-get dlmm-rescale) bin-price)))
-
 (define-public (initialize
   (x principal) (y principal)
   (min-x uint) (min-y uint)
-  (x-decimals uint) (y-decimals uint))
+  (feed (buff 32)))
   (begin
     (asserts! (is-eq tx-sender (var-get operator)) ERR_NOT_AUTHORIZED)
     (asserts! (not (var-get initialized)) ERR_ALREADY_INITIALIZED)
-    ;; x-decimals must be >= y-decimals so (- x-decimals y-decimals) doesn't
-    ;; underflow when computing dlmm-rescale. Pair the higher-decimal token as x.
-    (asserts! (>= x-decimals y-decimals) ERR_BAD_DECIMALS)
     (var-set token-x x)
     (var-set token-y y)
     (var-set min-token-x-deposit min-x)
     (var-set min-token-y-deposit min-y)
-    (var-set dlmm-rescale (pow u10 (+ u16 (- x-decimals y-decimals))))
+    (var-set oracle-feed feed)
     (var-set initialized true)
     (ok true)))
 
@@ -936,12 +858,6 @@
   (begin
     (asserts! (is-eq tx-sender (var-get operator)) ERR_NOT_AUTHORIZED)
     (ok (var-set operator new-operator))))
-
-(define-public (set-dex-source (source uint))
-  (begin
-    (asserts! (is-eq tx-sender (var-get operator)) ERR_NOT_AUTHORIZED)
-    (asserts! (or (is-eq source DEX_SOURCE_XYK) (is-eq source DEX_SOURCE_DLMM)) ERR_NOT_AUTHORIZED)
-    (ok (var-set dex-source source))))
 
 (define-public (set-min-token-y-deposit (amount uint))
   (begin
