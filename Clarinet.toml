@@ -87,8 +87,8 @@ epoch = "latest"
 
 [contracts.sbtc-usdcx-v2]
 path = "contracts/v2/sbtc-usdcx-v2.clar"
-clarity_version = 4
-epoch = "latest"
+clarity_version = 5
+epoch = "3.4"
 
 
 # [contracts.jing-vault-auth]
@@ -135,3 +135,8 @@ epoch = "3.4"
 # path = "contracts/jing-vault-v1.clar"
 # clarity_version = 4
 # epoch = "latest"
+
+[contracts.test-trait-fold]
+path = "contracts/test-trait-fold.clar"
+clarity_version = 5
+epoch = "3.4"
