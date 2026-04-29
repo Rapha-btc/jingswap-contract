@@ -1,184 +1,343 @@
 # jing-core
 
-The hub of the Jing protocol. Three jobs:
+The hub of the Jing protocol. Five jobs:
 
-1. **Canonical equity ledger** — single source of truth for "how much sBTC (or any token) does user X have committed to the Jing ecosystem right now". Read by Stacks Labs for the dual-stacking-boost cross-check via the `get-balance` read-only.
-2. **Allowlists** — gates which contracts are permitted to participate (vault code hashes, market principals, eventually SNPL reserves).
-3. **Single event stream** — every contract in the ecosystem (vaults and markets) emits its lifecycle events through jing-core, so dashboards/indexers only have to poll one contract.
+1. **Verified-contract template registry** — owner-proposes / validator-confirms list of canonical contract templates (vault, reserve, snpl) with a 144-burn-block timelock. Adds only — no removal.
+2. **Per-instance contract registry** — single map of registered ecosystem contracts (vaults, reserves, snpls), populated by hash-verified self-registration against the templates above. Adds only — no removal.
+3. **Governance: owner + validators** — owner proposes templates and adds validators; validators independently confirm template additions. Validator add is timelocked; validator remove is fast. Owner cannot be a validator.
+4. **Pause primitive** — protocol-wide halt of *entry* paths (deposits, settlements) while *exit* paths (withdraws, refunds, cancels) stay open. Owner-or-validator pauses instantly; owner unpauses after a 144-block cooldown.
+5. **Canonical equity ledger + single event stream** — per-principal sBTC bucket tracking for the dual-stacking-boost cross-check (Stacks Labs `get-balance(user)`), plus all lifecycle events for vaults, reserves, snpls, and markets emitted through one contract so dashboards/indexers poll one place.
 
-The contract's source comment header (`jing-core.clar:1-20`) is the inline reference for the same design.
+The contract source comment header (`jing-core.clar:1-20`) is the inline reference for the same design.
 
-## Why a hub at all
+## Why one-way registration everywhere
 
-Without a hub, integrators (Stacks Labs, indexers, third-party UIs) would have to:
+Both registries in jing-core are append-only:
 
-- Walk every approved market contract and aggregate per-user sBTC deposits across cycle states (active, rolled, refunded).
-- Walk every personal vault contract and read its sBTC balance.
-- Eventually walk SNPL reserves to count passive-lender deposits.
-- Reconcile the lot, including per-cycle pro-rata distributions and settlement rounding.
-
-Each new market or product would force an integration rewrite. Instead, jing-core's `token-equity` map is debited/credited atomically with every fund movement, and `get-balance(user)` is one read away.
-
-## Four product categories
-
-Per the architecture, four contract types are designed to plug into jing-core (each category has its own allowlist and integration pattern):
-
-| Category | What | Integration pattern |
+| Registry | Adds via | Removes via |
 |---|---|---|
-| **Jing markets** | Auction contracts (`sbtc-stx-0-jing-v2`, `sbtc-stx-20-jing-v2`, `sbtc-usdcx-jing-v2`, future pairs) | `is-approved-market` allowlist; calls `log-deposit-x/y`, `log-refund-x/y`, `log-distribute-*-depositor` with explicit `(token-x, token-y, depositor)` args |
-| **Jing vaults** | Personal vault contracts deployed per user (`jing-vault-v1`) | `register-vault` maps vault → owner; vault calls `log-deposit/log-withdraw` with `(asset, amount)` and `contract-caller` resolves to owner |
-| **Jing SNPL** | Per-borrower swap-now-pay-later loan contracts (`loan-sbtc-stx-0-jing` etc.) | Trust-by-bytecode-hash via approved snpl trait; no direct equity reporting (the snpl borrows from a reserve, not from a user, so its in-flight sBTC isn't user equity — it's lender capital) |
-| **Jing reserves** | Pooled lender capital backing SNPL (`loan-reserve`) | Calls `log-deposit/log-withdraw` like vaults; lender principal must be mapped to the reserve so equity attributes correctly (open architectural item — see end of doc) |
+| `verified-contracts` (templates) | propose (owner) → 144 blocks → confirm (validator) | **never** |
+| `registered-contracts` (instances) | hash-verified `register` from canonical bytecode | **never** |
 
-## The equity ledger
+Removal of confirmed templates or registered contracts could cascade into mid-flight settlement failures and stranded user funds. The protocol-level answer to "stop using this contract" is **pause**, not removal.
+
+## Verified-contract template flow
+
+```clarity
+(define-map verified-contracts principal (buff 32))
+(define-map pending-verified-contracts principal { hash: (buff 32), proposed-at: uint })
+(define-constant TIMELOCK_BURN_BLOCKS u144)  ;; ~24h
+```
+
+Two-step add, no remove:
+
+```
+owner: propose-verified-contract(canonical)
+       → reads canonical's code via (contract-hash? canonical)
+       → pending-verified-contracts[canonical] = { hash, proposed-at: burn-block-height }
+       
+... 144 burn blocks (~24h off-chain audit window) ...
+
+validator: confirm-verified-contract(canonical)
+           → verified-contracts[canonical] = hash
+           → pending-verified-contracts[canonical] cleared
+           
+owner: cancel-pending-contract(canonical)  -- abort before confirmation
+```
+
+**Why owner proposes but validator confirms:** keeps the owner from unilaterally promoting a template. The owner can introduce a candidate and abort it, but the trust-on-bytecode call requires a separate party (the validator) to ratify after the audit window.
+
+**Why hash is always computed on-chain** (not optionally provided): the deployer controls the canonical principal — they can always deploy the canonical first under their own address (its only job is to be the byte-identical reference for hashing) and propose against it. Allowing off-chain hash entry would add fat-finger risk and let a forged hash bypass the on-chain bytecode check, with no real benefit (pre-deploy proposal would only pipeline the timelock with deployment, not worth the security tradeoff).
+
+## Validator set
+
+```clarity
+(define-map validators principal bool)
+(define-data-var validator-count uint u0)
+(define-constant MAX_VALIDATORS u5)
+(define-map pending-validators principal uint)
+```
+
+| Action | Caller | Constraint |
+|---|---|---|
+| `propose-validator(p)` | owner | `p ≠ owner`, `p` not already validator, no pending, count < 5 |
+| `confirm-validator(p)` | **anyone** after timelock | bootstrap-friendly: a system with zero validators must be addable; once timelock elapsed, the proposal is public/auditable |
+| `cancel-pending-validator(p)` | owner | abort before confirmation |
+| `remove-validator(p)` | owner | **fast** (no timelock); a compromised validator must be ejectable instantly |
+
+`set-contract-owner(new-owner)` refuses to set a new owner who is currently a validator. Owner and validator must be distinct identities.
+
+**Asymmetry:** validator add is slow (trust establishment), remove is fast (emergency response). Removal can stall the system (no one to confirm template additions) but cannot bypass it (owner alone can't promote anything either) — so worst case is DoS, not exploit.
+
+## Per-instance contract registration
+
+```clarity
+(define-map registered-contracts principal bool)
+
+(define-public (register (canonical principal))
+  (let (
+    (caller contract-caller)
+    (caller-hash (unwrap! (contract-hash? contract-caller) ERR_INVALID_CONTRACT_HASH))
+    (verified-hash (unwrap! (map-get? verified-contracts canonical) ERR_NOT_VERIFIED))
+  )
+    (asserts! (is-eq caller-hash verified-hash) ERR_HASH_MISMATCH)
+    (asserts! (is-none (map-get? registered-contracts caller)) ERR_ALREADY_REGISTERED)
+    (map-set registered-contracts caller true)
+    (print { event: "registered", contract: caller, canonical: canonical, hash: caller-hash })
+    (ok true)))
+```
+
+**Single function, single map** for vaults, reserves, and snpls. The `canonical` principal in the event tells indexers what type the contract is (its name encodes the type, e.g. `.jing-vault-v1` vs `.loan-reserve` vs `.loan-sbtc-stx-0-jing`).
+
+**Bool-shape (Pillar pattern):** jing-core only tracks "is this contract registered". The contract's owner (vault's `OWNER`, reserve's `lender`, snpl's `borrower`) is stored on the contract itself and read off-chain via the contract's own getter. No `vault-owners` / `resolve-owner` indirection.
+
+**Hash-binding:** because the caller's bytecode is verified to match the canonical, and the canonical's source code dictates exactly what gets passed to `register`, no caller can forge identity. Mallory cannot register a malicious contract under the verified set — its hash won't match.
+
+**One-way:** no `unregister`. Severing a registered contract from jing-core could break in-flight log paths and strand funds. Use **pause** instead.
+
+### How each ecosystem contract registers
+
+```clarity
+;; jing-vault-v1.clar
+(define-public (initialize (canonical principal))
+  (begin
+    (asserts! (not (var-get initialized)) ERR_ALREADY_INITIALIZED)
+    (var-set initialized true)
+    (try! (contract-call? .jing-core register canonical))
+    (ok true)))
+
+;; loan-reserve.clar
+(define-public (initialize (canonical principal) (init-lender principal))
+  (begin
+    (asserts! (is-eq tx-sender DEPLOYER) ERR-NOT-DEPLOYER)
+    (asserts! (is-eq (var-get lender) SAINT) ERR-ALREADY-INIT)
+    (var-set lender init-lender)
+    (try! (contract-call? .jing-core register canonical))
+    (print { event: "initialize", lender: init-lender })
+    (ok true)))
+
+;; loan-sbtc-stx-0-jing.clar (snpl)
+(define-public (initialize (canonical principal) (init-borrower principal) (init-reserve <reserve-trait>))
+  (let ((init-reserve-addr (contract-of init-reserve)))
+    (asserts! (is-eq tx-sender DEPLOYER) ERR-NOT-DEPLOYER)
+    (asserts! (is-eq (var-get current-reserve) SAINT) ERR-ALREADY-INIT)
+    (var-set borrower init-borrower)
+    (var-set current-reserve init-reserve-addr)
+    (try! (contract-call? .jing-core register canonical))
+    (print { event: "initialize", borrower: init-borrower, reserve: init-reserve-addr, snpl: current-contract })
+    (ok true)))
+```
+
+**Vault `initialize` is anyone-callable** — `OWNER` is a `define-constant` captured at deploy (`(define-constant OWNER tx-sender)`), so the caller can't substitute a different owner.
+
+**Reserve and snpl `initialize` are deployer-only** — they take `init-lender` / `init-borrower` as args, so the deployer must be trusted to set them correctly. The deploy tx and the initialize tx are typically the same off-chain operator's actions.
+
+## Pause primitive
+
+```clarity
+(define-data-var paused bool false)
+(define-data-var paused-at uint u0)
+```
+
+Halts protocol *entries* while keeping *exits* unconditionally open. Funds never get stranded under pause.
+
+| Action | Caller | Constraint |
+|---|---|---|
+| `pause` | owner OR any validator | none — instant. Re-pause refreshes `paused-at` (extends cooldown if a new threat surfaces mid-pause) |
+| `unpause` | owner only | `burn-block-height >= paused-at + TIMELOCK_BURN_BLOCKS` (≈24h cooldown) |
+
+**Distributed pause, centralized + deliberate unpause.** Anyone with skin in the game (owner or any of up to 5 validators) can hit the brake instantly. Releasing requires the owner *and* a 24h cooldown, so a panic-pause can't be reversed within minutes by a conflicting party.
+
+A malicious validator who keeps re-pausing can be ejected via fast `remove-validator`.
+
+### What pause gates (`(try! (check-not-paused))`)
+
+7 entry-side log functions assert `(not paused)`:
+
+**Vault-side (3):** `log-deposit`, `log-jing-deposit`, `log-bitflow-swap`
+**Market-side (2):** `log-deposit-x`, `log-deposit-y`
+**Settlement chain (2):** `log-close-deposits`, `log-settlement` — these gate their entire sub-flows by tx atomicity (when log-close-deposits asserts pause, the whole tx reverts including any earlier `log-small-share-roll-x/y`; same for log-settlement covering limit-rolls + distribute-x/y-depositor + sweep-dust)
+
+**Reserve-side (2):** `log-reserve-supply`, `log-reserve-draw`
+**SNPL-side (2):** `log-snpl-borrow`, `log-snpl-swap-deposit`
+
+### What stays open under pause
+
+Withdraws, refunds, cancels, position-revocations, settlement distributions of in-flight cycles, position-parameter adjustments (set-limit), credit-line management, repays, seizures. User funds are always extractable.
+
+## Equity model — per-principal buckets
 
 ```clarity
 (define-map token-equity { token: principal, owner: principal } uint)
 (define-map total-token-equity principal uint)
 ```
 
-Keyed by `(token, owner)`. Today only sBTC entries matter for `get-balance` (dual-stacking-boost is sBTC-only), but the same map can track any token a market or vault credits — adding USDCx, future-pair tokens, etc. requires zero schema change.
+The `owner` key is a principal (a vault, a reserve, or a direct user) — **not an indirected user owner**. Every principal that holds sBTC inside the Jing ecosystem has its own bucket.
 
-### Read-only surface
+### Three equity helpers
 
 ```clarity
-(define-read-only (get-token-equity (token principal) (owner principal)) ...)
-(define-read-only (get-total-token-equity (token principal)) ...)
+(define-private (credit-if-not-registered (token principal) (p principal) (amount uint))
+  (if (is-registered p) true (credit token p amount)))
 
-;; Zest-shaped wrapper for Stacks Labs dual-stacking-boost.
+(define-private (debit-if-not-registered (token principal) (p principal) (amount uint))
+  (if (is-registered p) true (debit token p amount)))
+
+(define-private (credit-if-registered (token principal) (p principal) (amount uint))
+  (if (is-registered p) (credit token p amount) true))
+```
+
+**Equity philosophy:** equity tracks "tokens inside the Jing ecosystem." A token at a registered contract (vault, reserve, snpl) is in-ecosystem; at a non-registered principal (user wallet) it's out-of-ecosystem.
+
+- **`credit-if-not-registered`** — used on market deposits / refunds. Skips when depositor is a registered contract (their bucket already counts it, or in SNPL's case, shouldn't have one). Credits direct users.
+- **`debit-if-not-registered`** — symmetric for refunds back to depositor.
+- **`credit-if-registered`** — used on settlement distributions. Credits when recipient is a registered contract (received tokens stay in ecosystem). Skips for direct users (tokens went to their wallet, left ecosystem).
+
+### Buckets per contract type
+
+| Contract type | Bucket grows on | Stays put on | Bucket shrinks on |
+|---|---|---|---|
+| **Vault** | `log-deposit` (vault.deposit-stx/sbtc) | `log-jing-deposit` (vault → market — equity stays at vault), market deposits where vault is depositor (`credit-if-not-registered` skips because vault IS registered) | `log-withdraw` (vault → user) |
+| **Reserve** | `log-reserve-supply` when lender is a direct user; skipped when lender is a vault (vault bucket already counts) | `log-reserve-draw` (reserve → snpl — equity stays at reserve), `log-reserve-notify-return` | `log-reserve-withdraw-sbtc` |
+| **SNPL** | **never** | always (no log-snpl-* function ever credits or debits) | **never** |
+| **Direct user** | direct market deposits (`log-deposit-x/y` when user is depositor); direct lending (`log-reserve-supply` when user is lender); `credit-if-registered` no-ops for them so settlement distributions don't add equity (tokens went to their wallet) | various | `log-refund-x/y` when user is depositor |
+
+### Why SNPL never has a bucket
+
+SNPL holds *borrowed* sBTC — debt for the borrower, exposure for the lender. The lender's exposure is already counted on the reserve side; counting it again on the SNPL would double-count and create a borrow-to-boost loophole.
+
+**Symmetry with vault → market:** the boost stays at the source of the funds. Vault deposits into market: equity stays on vault (`log-jing-deposit` doesn't touch equity; market's `log-deposit-x` skips because vault is registered). Reserve drains into snpl: equity stays on reserve (`log-reserve-draw` doesn't touch equity; SNPL never credits).
+
+## Off-chain owner aggregation for dual-stacking
+
+Because jing-core no longer maps vault → owner, per-user aggregation is off-chain.
+
+Stacks Labs flow for "Alice's total sBTC equity in the Jing ecosystem":
+
+```typescript
+// 1. Alice's direct bucket (her own deposits / direct lending).
+const directEquity = await callReadOnly(
+  'jing-core', 'get-token-equity', [SBTC_TOKEN, alice]
+);
+
+// 2. Discover Alice's vaults / reserves via event scan.
+const events = await scanEvents('jing-core', 'registered');
+//   each: { contract, canonical, hash }
+
+const aliceContracts = [];
+for (const { contract, canonical } of events) {
+  let owner;
+  if (canonical.endsWith('.jing-vault-v1')) {
+    owner = await callReadOnly(contract, 'get-owner');     // vault has OWNER constant
+  } else if (canonical.endsWith('.loan-reserve')) {
+    owner = await callReadOnly(contract, 'get-lender');    // reserve has lender data-var
+  }
+  // SNPLs intentionally have no equity bucket; skip.
+  if (owner === alice) aliceContracts.push(contract);
+}
+
+// 3. Sum buckets.
+let total = directEquity;
+for (const c of aliceContracts) {
+  total += await callReadOnly('jing-core', 'get-token-equity', [SBTC_TOKEN, c]);
+}
+
+return total;
+```
+
+**Source of truth for ownership** is the contract itself (vault's `OWNER` constant, reserve's `lender` data-var). jing-core's only role is "is this principal a registered ecosystem contract? what's its bucket?" — the user-aggregate is a frontend concern.
+
+```clarity
+;; Zest-shaped read-only kept for backwards-compatibility. Returns Alice's
+;; DIRECT bucket only -- frontends do the per-user-vault aggregation above.
 (define-read-only (get-balance (user principal))
   (ok (get-token-equity SBTC_TOKEN user)))
 ```
 
-The `get-balance(user)` shape matches Zest's `zsbtc-v2-0.get-balance` reference contract (takes a principal, returns `(response uint uint)`).
+## Markets — same unified flow
 
-### Credit / debit semantics
-
-Two private helpers:
+Markets register through the same `register` function as vaults / reserves / snpls. Their bytecode hash is verified against `verified-contracts[canonical]` at registration time; their per-instance configuration (`token-x`, `token-y`, `oracle-feed` — or two feeds in the dual-feed variant — see `README-dual-feed-pricing.md`) is set inside the same atomic `initialize` call before `register` fires:
 
 ```clarity
-(define-private (credit (token principal) (who principal) (amount uint))
-  ;; map-set token-equity { token, owner: who } (+ current amount)
-  ;; map-set total-token-equity token (+ total amount))
-
-(define-private (debit (token principal) (who principal) (amount uint))
-  ;; floor at 0 so pro-rata rounding can't drive equity negative
-  ;; (let ((applied (if (> amount current) current amount))) ...))
+;; token-x-token-y-jing-v3.clar
+(define-public (initialize
+  (canonical principal)
+  (x principal) (y principal)
+  (min-x uint) (min-y uint)
+  (feed (buff 32)))
+  (begin
+    (asserts! (is-eq tx-sender (var-get operator)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (var-get initialized)) ERR_ALREADY_INITIALIZED)
+    (var-set token-x x) (var-set token-y y)
+    (var-set min-token-x-deposit min-x) (var-set min-token-y-deposit min-y)
+    (var-set oracle-feed feed)
+    (var-set initialized true)
+    (try! (contract-call? .jing-core register canonical))
+    (ok true)))
 ```
 
-Plus three vault-aware wrappers used by market-side endpoints:
+**Trust model:** the hash check guarantees the market's *bytecode* is canonical; the operator (`tx-sender = operator` on `initialize`) is trusted to set `token-x` / `token-y` / `oracle-feed` correctly. Misconfiguration (e.g. wrong oracle for the pair) is an operator concern, not a protocol concern — same trust model as reserves (deployer trusted to set lender) and snpls (deployer trusted to set borrower / current-reserve).
 
-| Helper | Behavior |
+**Same one-way semantics:** once a market is registered, it stays registered. The protocol-level response to a misconfigured or compromised market is **pause** (which halts all entry-side log calls including `log-deposit-x/y` and the settlement chain) plus the market's own per-instance pause flag (`paused` data-var on the market itself).
+
+## Event stream
+
+Every lifecycle event in the Jing ecosystem flows through jing-core's print events, so an indexer only polls one contract.
+
+**Vault events:** `vault-deposit`, `vault-withdraw`, `vault-jing-deposit`, `vault-bitflow-swap`, `vault-revoke`, `vault-cancel`
+
+**Market events:** `deposit-x/y`, `refund-x/y`, `set-limit-x/y`, `close-deposits`, `small-share-roll-x/y`, `limit-roll-x/y`, `settlement`, `distribute-x-depositor`, `distribute-y-depositor`, `sweep-dust`, `cancel-cycle`
+
+**Reserve events:** `reserve-supply`, `reserve-withdraw-sbtc`, `reserve-withdraw-stx`, `reserve-open-credit-line`, `reserve-set-credit-line-cap`, `reserve-set-credit-line-interest`, `reserve-close-credit-line`, `reserve-set-paused`, `reserve-set-min-sbtc-draw`, `reserve-draw`, `reserve-notify-return`
+
+**SNPL events:** `snpl-set-reserve`, `snpl-borrow`, `snpl-swap-deposit`, `snpl-cancel-swap`, `snpl-set-swap-limit`, `snpl-repay`, `snpl-seize`
+
+**Governance events:** `verified-contract-proposed`, `verified-contract-confirmed`, `verified-contract-cancelled`, `validator-proposed`, `validator-confirmed`, `validator-cancelled`, `validator-removed`, `paused`, `unpaused`, `registered`, `market-approved`, `market-revoked`
+
+**Note on initialize events:** each ecosystem contract still emits its own local `initialize` event because that fires *before* the contract is in `registered-contracts` (chicken-and-egg with auth). Once registered, all subsequent events go through jing-core.
+
+## Error code map
+
+| Code | Meaning |
 |---|---|
-| `credit-if-not-vault` | Credit only if the principal is NOT a registered vault. Avoids double-counting when a vault deposits into a market — equity was already credited at vault ingress. |
-| `debit-if-not-vault` | Symmetric — debit only on non-vault principals. |
-| `credit-if-vault` | Credit ONLY if the principal IS a registered vault, and walk to the owner via `resolve-owner`. Used at distribute-time to credit the human, not the vault contract. |
-
-## Two integration patterns: vaults vs markets
-
-### Vault-side endpoints (sBTC-only, contract-caller-implicit)
-
-```clarity
-(define-public (log-deposit (asset (string-ascii 4)) (amount uint))
-  (let ((owner (resolve-owner contract-caller)))
-    (and (is-eq asset "sbtc") (credit SBTC_TOKEN owner amount))
-    ...))
-
-(define-public (log-withdraw (asset (string-ascii 4)) (amount uint))
-  (let ((owner (resolve-owner contract-caller)))
-    (and (is-eq asset "sbtc") (debit SBTC_TOKEN owner amount))
-    ...))
-```
-
-- The asset is identified by a 4-char string `"sbtc"` or `"stx"`. Only `"sbtc"` updates the equity map; `"stx"` flows are event-stream-only (because dual-stacking-boost is sBTC-only by design).
-- `contract-caller` is the calling vault. `resolve-owner` walks the `vault-owners` map to attribute equity to the human.
-- Same pattern is used by `loan-reserve.clar` (sBTC-only contract) — see the SNPL reserve open item below.
-
-### Market-side endpoints (token-agnostic, depositor-explicit)
-
-```clarity
-(define-public (log-deposit-x
-    (depositor principal)
-    (amount uint) (delta uint) (limit uint) (cycle uint)
-    (bumped (optional principal)) (bumped-amount uint)
-    (token-x principal) (token-y principal))
-  (let ((owner (resolve-owner depositor)))
-    (asserts! (is-approved-market contract-caller) ERR_NOT_APPROVED_MARKET)
-    (match bumped b (debit-if-not-vault token-x b bumped-amount) true)
-    (credit-if-not-vault token-x depositor delta)
-    ...))
-```
-
-- The market passes its own `(token-x, token-y)` constants. jing-core doesn't hardcode which token is "base"; the indexer aggregates across pairs.
-- `depositor` is passed explicitly because markets settle for many users in one tx — `contract-caller` would just be the market itself.
-- `is-approved-market` allowlist gates these endpoints so only sanctioned markets can mutate equity.
-- Mirrored on the y-side (`log-deposit-y`), refunds (`log-refund-x/y`), and distributions (`log-distribute-x-depositor`, `log-distribute-y-depositor`).
-
-### Why both patterns
-
-Vaults are 1:1 with users (each user deploys their own vault, registers it, and operates as the only depositor) — `contract-caller` plus an owner-resolution map is enough.
-
-Markets are N:1 (one market, many depositors) — the depositor must be passed explicitly because they're not the tx-sender, the market is.
-
-## The `resolve-owner` chain
-
-Why a vault contract can call `log-deposit` and have the equity attributed to the human owner:
-
-```clarity
-(define-read-only (resolve-owner (p principal))
-  (default-to p (map-get? vault-owners p)))
-```
-
-If `p` is a registered vault, return its owner. Otherwise return `p` as-is.
-
-So:
-- User deploys vault, calls `register-vault(vault-id)` → `vault-owners[vault] = user`.
-- Vault deposits sBTC, calls `log-deposit "sbtc" amount`.
-- Inside jing-core: `(resolve-owner contract-caller)` = `(resolve-owner vault)` = `user`.
-- `(credit SBTC_TOKEN user amount)` → `token-equity[(SBTC, user)] += amount`.
-- `get-balance(user)` returns the user's sBTC, including what's sitting in their vault.
-
-The same chain works through `register-vault` for any contract that holds funds on behalf of a single principal — which is the open question for SNPL reserves.
-
-## Allowlists
-
-```clarity
-(define-map approved-hashes (buff 32) bool)       ;; vault bytecode hashes
-(define-map approved-markets principal bool)       ;; market principals
-```
-
-- `approved-hashes` gates which vault bytecodes are recognized — a user deploys a vault, its source compiles to a known hash, jing-core's owner approves the hash, then `register-vault` is allowed for any contract with that hash. (Today `register-vault` doesn't enforce hash-checking — the design space leaves this to a registrar wrapper or future hardening.)
-- `approved-markets` gates which contract principals can call the `log-*-x/y` market endpoints. Without this, anyone could fabricate equity by calling `log-deposit-x` from an arbitrary contract.
-
-Future allowlists per the four-category split: an approved-snpl set (gates which loan-snpl bytecodes a reserve will fund) and an approved-reserve set (gates which reserve principals are recognized for SNPL lender attribution).
-
-## Open architectural item: SNPL reserve attribution
-
-The recently-added `loan-reserve.clar` follows the vault-side pattern: `supply` calls `log-deposit "sbtc"`, `withdraw-sbtc` calls `log-withdraw "sbtc"`. This works for crediting equity *somewhere*, but right now the credits land on the **reserve principal**, not the lender, because the reserve isn't in `vault-owners`.
-
-Three options:
-
-1. **Manual `register-vault` per reserve** — lender calls `register-vault(reserve-id)` once before supplying. Reuses existing infrastructure. Constraint: a lender who already has a personal vault registered can't also register a reserve (the `user-vaults` slot is 1:1).
-
-2. **Auto-register inside reserve `initialize`** — same effect, packaged as one extra contract-call inside the reserve's init. Same constraint.
-
-3. **`link-reserve` endpoint with a parallel map** — add a separate `reserve-lenders { reserve: principal -> lender: principal }` map and extend `resolve-owner` to consult it. No conflict with personal-vault registrations; cleanest long-term, matches the four-category architecture (vaults and reserves as parallel concepts).
-
-Option 3 is the natural fit for the four-category design and avoids the user-vaults conflict. To be decided before SNPL ships to mainnet — until then, the reserve's log calls fire but credits attribute to the reserve principal rather than the lender.
+| 5001 `ERR_NOT_AUTHORIZED` | Caller isn't the owner / a validator / a registered contract / etc. |
+| 5002 `ERR_INVALID_CONTRACT_HASH` | `(contract-hash? p)` returned `none` (caller isn't a contract, or contract doesn't exist) |
+| 5003 `ERR_ALREADY_REGISTERED` | Trying to register something already registered |
+| 5005 `ERR_NOT_VERIFIED` | `register` called against a canonical not in `verified-contracts` |
+| 5006 `ERR_HASH_MISMATCH` | Caller's bytecode hash ≠ verified-contracts[canonical] |
+| 5007 `ERR_NO_PENDING_PROPOSAL` | confirm/cancel called on something that wasn't proposed |
+| 5008 `ERR_TIMELOCK_NOT_ELAPSED` | confirm called before 144 burn blocks elapsed; or unpause before cooldown |
+| 5009 `ERR_OWNER_CANNOT_BE_VALIDATOR` | Tried to add the owner as a validator |
+| 5010 `ERR_ALREADY_VALIDATOR` | Validator add for an existing validator |
+| 5011 `ERR_VALIDATOR_PENDING` | Validator add for one already in pending |
+| 5012 `ERR_VALIDATOR_LIMIT_REACHED` | More than `MAX_VALIDATORS` (5) |
+| 5013 `ERR_NO_PENDING_VALIDATOR` | Confirm-validator with no proposal |
+| 5014 `ERR_NOT_VALIDATOR` | Remove-validator on a non-validator |
+| 5015 `ERR_NEW_OWNER_IS_VALIDATOR` | set-contract-owner to an existing validator |
+| 5016 `ERR_PAUSED` | Entry-side log called while paused |
 
 ## File map
 
 ```
-contracts/jing-core.clar             ;; this contract
-contracts/jing-vault-v1.clar         ;; reference vault implementation
-contracts/jing-vault-auth.clar       ;; SIP-018 intent helpers used by jing-vault-v1
-contracts/loan/loan-reserve.clar     ;; SNPL reserve (calls log-deposit/log-withdraw)
-contracts/loan/loan-sbtc-stx-0-jing.clar  ;; SNPL borrower contract (no direct equity reporting)
+contracts/jing-core.clar                  ;; this contract
+contracts/jing-vault-v1.clar              ;; reference vault — registers via .register
+contracts/jing-vault-auth.clar            ;; SIP-018 intent helpers used by jing-vault-v1
+contracts/loan/loan-reserve.clar          ;; reserve — registers via .register
+contracts/loan/loan-sbtc-stx-0-jing.clar  ;; snpl (per-market specialization)
+contracts/loan/reserve-trait.clar         ;; reserve-trait used by snpl
+contracts/loan/snpl-trait.clar            ;; snpl-trait used by reserve
+contracts/v3/token-x-token-y-jing-v3.clar          ;; single-feed market template
+contracts/v3/token-x-token-y-jing-v3-stx-sbtc.clar ;; dual-feed market template (sBTC/STX)
 ```
 
 ## See also
 
-- **Email thread with Stacks Labs** (Alex / Adam) for the dual-stacking-boost ask and the Zest `get-balance` reference shape.
-- **`jing-vault-v1.clar`** lines 102–136 for the reference pattern of `log-deposit` / `log-withdraw` calls.
-- **`loan-reserve.clar`** lines 89–103 for the SNPL reserve's analogous wiring.
-- **`jing-core.clar`** header comment (lines 1–20) for the in-source design rationale.
+- **`README-dual-feed-pricing.md`** — pricing / Pyth-expo handling for the dual-feed market variant
+- **`README-blind-premium.md`** — pre-v3 market design (sbtc-stx-0-jing-v2 etc.) still live
+- **`README-jing-loan.md`** — SNPL borrower-side flow
+- **`jing-core.clar`** header comment (lines 1–20) for the in-source design rationale
+
+## Open follow-ups
+
+- Replace dummy `(asserts! (>= amount u0) ERR_NOT_AUTHORIZED)` in `log-deposit` / `log-withdraw` with `(asserts! (is-registered contract-caller) ERR_NOT_AUTHORIZED)` (the `>= u0` check is always true since `amount` is `uint`; meaningful auth check now requires the unified registry).
+- Tests for the unified `register`, the validator + timelock flows, the pause / unpause cooldown, and the equity helper semantics across vault / reserve / snpl / market interactions.

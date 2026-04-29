@@ -95,6 +95,11 @@ path = "contracts/v3/token-x-token-y-jing-v3.clar"
 clarity_version = 5
 epoch = "3.4"
 
+[contracts.token-x-token-y-jing-v3-stx-sbtc]
+path = "contracts/v3/token-x-token-y-jing-v3-stx-sbtc.clar"
+clarity_version = 5
+epoch = "3.4"
+
 
 # [contracts.jing-vault-auth]
 # path = "contracts/jing-vault-auth.clar"
