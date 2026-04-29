@@ -69,6 +69,7 @@
 (define-constant ERR_LIMIT_REQUIRED (err u1017))
 (define-constant ERR_ALREADY_INITIALIZED (err u1018))
 (define-constant ERR_WRONG_TRAIT (err u1019))
+(define-constant ERR_EXPO_MISMATCH (err u1020))
 
 (define-data-var treasury principal tx-sender)
 (define-data-var operator principal tx-sender)
@@ -711,6 +712,7 @@
     (asserts! (> (get publish-time feed-y) min-freshness) ERR_STALE_PRICE)
     (asserts! (< (get conf feed-x) (/ price-x MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
     (asserts! (< (get conf feed-y) (/ price-y MAX_CONF_RATIO)) ERR_PRICE_UNCERTAIN)
+    (asserts! (is-eq (get expo feed-x) (get expo feed-y)) ERR_EXPO_MISMATCH)
     (let ((oracle-price (/ (* price-x PRICE_PRECISION) price-y)))
     (asserts! (> oracle-price u0) ERR_ZERO_PRICE)
 
