@@ -49,6 +49,7 @@
 (define-constant ERR_NO_FUNDS (err u6006))
 (define-constant ERR_INVALID_SIDE (err u6011))
 (define-constant ERR_INVALID_PRICE (err u6013))
+(define-constant ERR_ALREADY_INITIALIZED (err u6020))
 
 ;; ---------------------------------------------------------------
 ;; State
@@ -64,6 +65,12 @@
 ;; Replay map -- Pillar pattern. Once a message-hash is consumed (executed
 ;; or revoked), it cannot be used again.
 (define-map used-pubkey-authorizations (buff 32) (buff 33))
+
+;; One-shot init flag. `initialize` registers this vault with jing-core
+;; against an approved code hash. Anyone can call it -- the OWNER passed
+;; to jing-core is hardcoded in this contract's bytecode, so the caller
+;; cannot substitute a different owner.
+(define-data-var initialized bool false)
 
 ;; ---------------------------------------------------------------
 ;; Read-only
@@ -84,6 +91,25 @@
 
 (define-read-only (is-signature-used (h (buff 32)))
   (is-some (map-get? used-pubkey-authorizations h)))
+
+(define-read-only (is-initialized) (var-get initialized))
+
+;; ---------------------------------------------------------------
+;; Initialization
+;; ---------------------------------------------------------------
+
+;; Register this vault with jing-core. Anyone can call -- OWNER is
+;; pinned in the bytecode at deploy, so the caller has no way to
+;; mis-attribute ownership. The caller passes `canonical`, the principal
+;; of a verified jing-vault template (e.g. 'SP....jing-vault-v1) that
+;; this vault claims to be byte-identical to; jing-core verifies the
+;; hash match before accepting.
+(define-public (initialize (canonical principal))
+  (begin
+    (asserts! (not (var-get initialized)) ERR_ALREADY_INITIALIZED)
+    (var-set initialized true)
+    (try! (contract-call? .jing-core register canonical))
+    (ok true)))
 
 ;; ---------------------------------------------------------------
 ;; Owner-only admin

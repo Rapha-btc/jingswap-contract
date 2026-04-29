@@ -114,16 +114,18 @@
 
 ;; ---------- Initialization ----------
 
-;; One-shot: deployer sets the borrower and reserve. After this, the
-;; reserve var is no longer SAINT, so re-calling fails. Borrower can
-;; then swap reserves later via `set-reserve` (subject to active-loan
-;; gate).
-(define-public (initialize (init-borrower principal) (init-reserve <reserve-trait>))
+;; One-shot: deployer sets the borrower and reserve, and registers this
+;; snpl with jing-core against an approved canonical snpl template.
+;; After this, the reserve var is no longer SAINT, so re-calling fails.
+;; Borrower can then swap reserves later via `set-reserve` (subject to
+;; active-loan gate).
+(define-public (initialize (canonical principal) (init-borrower principal) (init-reserve <reserve-trait>))
   (let ((init-reserve-addr (contract-of init-reserve)))
     (asserts! (is-eq tx-sender DEPLOYER) ERR-NOT-DEPLOYER)
     (asserts! (is-eq (var-get current-reserve) SAINT) ERR-ALREADY-INIT)
     (var-set borrower init-borrower)
     (var-set current-reserve init-reserve-addr)
+    (try! (contract-call? .jing-core register canonical))
     (print { event: "initialize",
              borrower: init-borrower,
              reserve: init-reserve-addr,
@@ -138,7 +140,7 @@
     (asserts! (is-eq tx-sender (var-get borrower)) ERR-NOT-BORROWER)
     (asserts! (is-none (var-get active-loan)) ERR-ACTIVE-LOAN-EXISTS)
     (var-set current-reserve new-reserve-addr)
-    (print { event: "set-reserve", reserve: new-reserve-addr, snpl: current-contract })
+    (try! (contract-call? .jing-core log-snpl-set-reserve new-reserve-addr))
     (ok true)))
 
 ;; ---------- Loan lifecycle ----------
@@ -169,14 +171,8 @@
       })
       (var-set active-loan (some loan-id))
       (var-set next-loan-id (+ loan-id u1))
-      (print { event: "borrow", 
-               loan-id: loan-id, 
-               amount: amount,
-               borrower: tx-sender,
-               snpl: current-contract,
-               interest-bps: line-bps,
-               deadline: deadline,
-               reserve: reserve-addr })
+      (try! (contract-call? .jing-core log-snpl-borrow
+              loan-id tx-sender amount line-bps deadline reserve-addr))
       (ok loan-id))))
 
 ;; Step 2: deposit sBTC into Jing during a deposit phase. Past deadline,
@@ -195,12 +191,8 @@
       jing-cycle: jing-cycle,
       limit-price: limit-price
     }))
-    (print { event: "swap-deposit", 
-             loan-id: loan-id, 
-             amount: amount,
-             limit: limit-price, 
-             cycle: jing-cycle,
-             snpl: current-contract })
+    (try! (contract-call? .jing-core log-snpl-swap-deposit
+            loan-id amount limit-price jing-cycle))
     (ok true)))
 
 ;; Pull sBTC back from Jing. Loan stays OPEN; recovered sBTC sits on
@@ -214,7 +206,7 @@
               ERR-NOT-BORROWER)
     (try! (as-contract? ((with-all-assets-unsafe))
       (try! (contract-call? JING-MARKET cancel-sbtc-deposit))))
-    (print { event: "cancel-swap", loan-id: loan-id, snpl: current-contract })
+    (try! (contract-call? .jing-core log-snpl-cancel-swap loan-id))
     (ok true)))
 
 (define-public (set-swap-limit (loan-id uint) (limit-price uint))
@@ -225,7 +217,7 @@
     (map-set loans loan-id (merge loan { limit-price: limit-price }))
     (try! (as-contract? ()
       (try! (contract-call? JING-MARKET set-sbtc-limit limit-price))))
-    (print { event: "set-swap-limit", limit-price: limit-price, snpl: current-contract })
+    (try! (contract-call? .jing-core log-snpl-set-swap-limit loan-id limit-price))
     (ok true)))
 
 (define-public (repay (loan-id uint) (reserve <reserve-trait>))
@@ -278,16 +270,8 @@
     (try! (contract-call? reserve notify-return notional))
     (map-set loans loan-id (merge loan { position-stx: stx-out, status: STATUS-REPAID }))
     (var-set active-loan none)
-    (print { event: "repay",
-             loan-id: loan-id,
-             payoff-sbtc: payoff,
-             lender-payoff-sbtc: lender-payoff,
-             fee-sbtc: fee,
-             delta-sbtc: delta,
-             is-shortfall: is-shortfall,
-             stx-released: stx-out,
-             snpl: current-contract,
-             reserve: reserve-addr })
+    (try! (contract-call? .jing-core log-snpl-repay
+            loan-id payoff lender-payoff fee delta is-shortfall stx-out reserve-addr))
     (ok true)))
 
 ;; Permissionless past-deadline seize. Requires Jing to hold none of
@@ -316,10 +300,6 @@
     (try! (contract-call? reserve notify-return notional))
     (map-set loans loan-id (merge loan { position-stx: stx-out, status: STATUS-SEIZED }))
     (var-set active-loan none)
-    (print { event: "seize", 
-             loan-id: loan-id,
-             stx-seized: stx-out, 
-             sbtc-seized: sbtc-balance,
-             snpl: current-contract,
-             reserve: reserve-addr })
+    (try! (contract-call? .jing-core log-snpl-seize
+            loan-id stx-out sbtc-balance reserve-addr))
     (ok true)))

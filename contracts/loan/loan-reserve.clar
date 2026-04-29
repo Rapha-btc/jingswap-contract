@@ -74,13 +74,16 @@
 
 ;; ---------- Initialization ----------
 
-;; One-shot: deployer sets the lender. Until called, the lender var
-;; equals SAINT, blocking all admin functions and withdraws.
-(define-public (initialize (init-lender principal))
+;; One-shot: deployer sets the lender and registers this reserve with
+;; jing-core against an approved canonical reserve template. Until
+;; called, the lender var equals SAINT, blocking all admin functions
+;; and withdraws.
+(define-public (initialize (canonical principal) (init-lender principal))
   (begin
     (asserts! (is-eq tx-sender DEPLOYER) ERR-NOT-DEPLOYER)
     (asserts! (is-eq (var-get lender) SAINT) ERR-ALREADY-INIT)
     (var-set lender init-lender)
+    (try! (contract-call? .jing-core register canonical))
     (print { event: "initialize", lender: init-lender })
     (ok true)))
 
@@ -91,8 +94,7 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
     (try! (contract-call? SBTC transfer amount tx-sender current-contract none))
-    (try! (contract-call? .jing-core log-deposit "sbtc" amount))
-    (print { event: "supply", amount: amount })
+    (try! (contract-call? .jing-core log-reserve-supply amount))
     (ok true)))
 
 (define-public (withdraw-sbtc (amount uint))
@@ -100,8 +102,7 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? SBTC transfer amount current-contract (var-get lender) none))))
-    (try! (contract-call? .jing-core log-withdraw "sbtc" amount))
-    (print { event: "withdraw-sbtc", amount: amount })
+    (try! (contract-call? .jing-core log-reserve-withdraw-sbtc amount))
     (ok true)))
 
 ;; Sweeps STX accumulated from seized snpl loans back to the lender.
@@ -110,7 +111,7 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (try! (as-contract? ((with-stx amount))
       (try! (stx-transfer? amount current-contract (var-get lender)))))
-    (print { event: "withdraw-stx", amount: amount })
+    (try! (contract-call? .jing-core log-reserve-withdraw-stx amount))
     (ok true)))
 
 ;; ---------- Credit lines (lender-gated) ----------
@@ -126,18 +127,15 @@
       interest-bps: interest-bps,
       outstanding-sbtc: u0
     })
-    (print { event: "open-credit-line",
-             snpl: snpl-addr,
-             borrower: borrower,
-             cap-sbtc: cap-sbtc,
-             interest-bps: interest-bps })
+    (try! (contract-call? .jing-core log-reserve-open-credit-line
+            snpl-addr borrower cap-sbtc interest-bps))
     (ok true)))
 
 (define-public (set-credit-line-cap (snpl principal) (new-cap uint))
   (let ((line (unwrap! (map-get? credit-lines snpl) ERR-LINE-NOT-FOUND)))
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (map-set credit-lines snpl (merge line { cap-sbtc: new-cap }))
-    (print { event: "set-credit-line-cap", snpl: snpl, cap-sbtc: new-cap })
+    (try! (contract-call? .jing-core log-reserve-set-credit-line-cap snpl new-cap))
     (ok true)))
 
 ;; Adjusts the rate for future loans on this line. Existing loans keep
@@ -146,7 +144,7 @@
   (let ((line (unwrap! (map-get? credit-lines snpl) ERR-LINE-NOT-FOUND)))
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (map-set credit-lines snpl (merge line { interest-bps: new-bps }))
-    (print { event: "set-credit-line-interest", snpl: snpl, interest-bps: new-bps })
+    (try! (contract-call? .jing-core log-reserve-set-credit-line-interest snpl new-bps))
     (ok true)))
 
 ;; Only callable when outstanding is zero (no in-flight loans on this snpl).
@@ -155,14 +153,14 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (asserts! (is-eq (get outstanding-sbtc line) u0) ERR-OUTSTANDING-NONZERO)
     (map-delete credit-lines snpl)
-    (print { event: "close-credit-line", snpl: snpl })
+    (try! (contract-call? .jing-core log-reserve-close-credit-line snpl))
     (ok true)))
 
 (define-public (set-paused (new-paused bool))
   (begin
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (var-set paused new-paused)
-    (print { event: "set-paused", paused: new-paused })
+    (try! (contract-call? .jing-core log-reserve-set-paused new-paused))
     (ok true)))
 
 ;; Sets the global minimum draw across all snpls. Lender only.
@@ -171,7 +169,7 @@
     (asserts! (is-eq tx-sender (var-get lender)) ERR-NOT-LENDER)
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
     (var-set min-sbtc-draw amount)
-    (print { event: "set-min-sbtc-draw", amount: amount })
+    (try! (contract-call? .jing-core log-reserve-set-min-sbtc-draw amount))
     (ok true)))
 
 ;; ---------- Draw / notify-return (snpl-gated) ----------
@@ -192,10 +190,7 @@
     (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
       (try! (contract-call? SBTC transfer amount current-contract caller none))))
     (map-set credit-lines caller (merge line { outstanding-sbtc: new-outstanding }))
-    (print { event: "draw", 
-             snpl: caller, 
-             amount: amount,
-             new-outstanding-sbtc: new-outstanding })
+    (try! (contract-call? .jing-core log-reserve-draw caller amount new-outstanding))
     (ok (get interest-bps line))))
 
 ;; Called by a snpl at `repay` / `seize` to release principal against
@@ -209,8 +204,6 @@
     (map-set credit-lines caller (merge line {
       outstanding-sbtc: (- current notional)
     }))
-    (print { event: "notify-return",
-             snpl: caller,
-             amount: notional,
-             new-outstanding-sbtc: (- current notional) })
+    (try! (contract-call? .jing-core log-reserve-notify-return
+            caller notional (- current notional)))
     (ok true)))
