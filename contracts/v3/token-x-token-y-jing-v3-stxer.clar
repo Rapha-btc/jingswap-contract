@@ -852,6 +852,7 @@
     (ok true)))
 
 (define-public (initialize
+  (canonical principal)
   (x principal) (y principal)
   (min-x uint) (min-y uint)
   (feed (buff 32)))
@@ -864,6 +865,7 @@
     (var-set min-token-y-deposit min-y)
     (var-set oracle-feed feed)
     (var-set initialized true)
+    (try! (contract-call? .jing-core register canonical))
     (ok true)))
 
 (define-public (set-treasury (new-treasury principal))
