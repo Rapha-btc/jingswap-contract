@@ -8,7 +8,7 @@
 (use-trait wormhole-core-trait 'SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2.core-trait)
 (use-trait ft-trait 'SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE.sip-010-trait-ft-standard.sip-010-trait)
 
-(define-constant CANCEL_THRESHOLD u42)
+(define-constant CANCEL_THRESHOLD u0)
 
 (define-constant PHASE_DEPOSIT u0)
 (define-constant PHASE_SETTLE u2)

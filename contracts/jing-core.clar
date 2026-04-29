@@ -162,6 +162,7 @@
 
 (define-public (log-deposit (asset (string-ascii 4)) (amount uint))
   (let ((owner (resolve-owner contract-caller)))
+    (asserts! (>= amount u0) ERR_NOT_AUTHORIZED)
     (and (is-eq asset "sbtc") (credit SBTC_TOKEN owner amount))
     (print { event: "vault-deposit", vault: contract-caller, owner: owner,
              asset: asset, amount: amount,
@@ -170,6 +171,7 @@
 
 (define-public (log-withdraw (asset (string-ascii 4)) (amount uint))
   (let ((owner (resolve-owner contract-caller)))
+    (asserts! (>= amount u0) ERR_NOT_AUTHORIZED)
     (and (is-eq asset "sbtc") (debit SBTC_TOKEN owner amount))
     (print { event: "vault-withdraw", vault: contract-caller, owner: owner,
              asset: asset, amount: amount,
