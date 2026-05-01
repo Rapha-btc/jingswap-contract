@@ -1,13 +1,13 @@
 ;; jing-vault-v1
 ;; Personal vault for conditional execution into the sBTC/STX Jing market
-;; (.token-x-token-y-jing-v3-stx-special-sbtc) with a Bitflow xyk fallback path.
+;; (JING-MARKET) with a Bitflow xyk fallback path.
 ;; Each user deploys their own instance.
 ;;
 ;; - Owner: deposits/withdraws funds, signs SIP-018 intents off-chain.
 ;; - Keeper: submits signed intents (jing-deposit, bitflow-swap) and
 ;;           triggers unsigned cancels / revocations on the owner's behalf.
 ;; - Funds never leave owner's control except into the registered market
-;;   (.token-x-token-y-jing-v3-stx-special-sbtc), into Bitflow's xyk-core-v-1-2
+;;   (JING-MARKET), into Bitflow's xyk-core-v-1-2
 ;;   sBTC/STX pool (pinned principals), or back to OWNER.
 ;;
 ;; All assets and venues are pinned at compile time. There are no trait
@@ -51,10 +51,19 @@
 (define-constant SBTC_TOKEN 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 (define-constant WSTX_TOKEN 'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2)
 
+;; Jing market this vault is bound to (sBTC = token-x, native STX on y).
+(define-constant JING-MARKET .token-x-token-y-jing-v3-stx-special-sbtc)
+
 ;; Bitflow xyk pool used by execute-bitflow-swap. Pool layout: x=sBTC,
 ;; y=wstx (handled with native STX via xyk-core's wrapping).
 (define-constant XYK_CORE 'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2)
 (define-constant XYK_POOL_SBTC_STX 'SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1)
+
+;; Bitflow DLMM router + pool used by execute-dlmm-swap. Pool layout:
+;; x=wstx, y=sBTC (Bitflow's DLMM names the pool stx-sbtc, inverse of
+;; the xyk pool layout above and inverse of the v3 jing market).
+(define-constant DLMM_ROUTER 'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-swap-router-v-1-1)
+(define-constant DLMM_POOL_STX_SBTC 'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15)
 
 ;; Asset names: doubly used as (a) the SIP-010 ft identifier in `with-ft`
 ;; and (b) the side label embedded in the SIP-018 message hash. Renaming
@@ -194,10 +203,10 @@
                   (is-eq (some tx-sender) (var-get keeper)))
               ERR_NOT_OWNER)
     (try! (as-contract? ((with-all-assets-unsafe))
-      (try! (contract-call? .token-x-token-y-jing-v3-stx-special-sbtc
+      (try! (contract-call? JING-MARKET
               cancel-token-y-deposit WSTX_TOKEN ASSET_WSTX))))
     (try! (contract-call? .jing-core log-cancel
-      .token-x-token-y-jing-v3-stx-special-sbtc WSTX_TOKEN))
+      JING-MARKET WSTX_TOKEN))
     (ok true)))
 
 (define-public (cancel-jing-sbtc)
@@ -206,10 +215,10 @@
                   (is-eq (some tx-sender) (var-get keeper)))
               ERR_NOT_OWNER)
     (try! (as-contract? ((with-all-assets-unsafe))
-      (try! (contract-call? .token-x-token-y-jing-v3-stx-special-sbtc
+      (try! (contract-call? JING-MARKET
               cancel-token-x-deposit SBTC_TOKEN ASSET_SBTC))))
     (try! (contract-call? .jing-core log-cancel
-      .token-x-token-y-jing-v3-stx-special-sbtc SBTC_TOKEN))
+      JING-MARKET SBTC_TOKEN))
     (ok true)))
 
 ;; ---------------------------------------------------------------
@@ -238,16 +247,16 @@
     (try! (verify-and-consume msg-hash sig expiry))
     (if (is-eq side ASSET_WSTX)
       (try! (as-contract? ((with-stx amount))
-        (try! (contract-call? .token-x-token-y-jing-v3-stx-special-sbtc
+        (try! (contract-call? JING-MARKET
           deposit-token-y amount limit-price WSTX_TOKEN ASSET_WSTX))))
       (if (is-eq side ASSET_SBTC)
         (try! (as-contract? ((with-ft SBTC_TOKEN ASSET_SBTC amount))
-          (try! (contract-call? .token-x-token-y-jing-v3-stx-special-sbtc
+          (try! (contract-call? JING-MARKET
             deposit-token-x amount limit-price SBTC_TOKEN ASSET_SBTC))))
         (asserts! false ERR_INVALID_SIDE)))
     (try! (contract-call? .jing-core log-jing-deposit
       msg-hash
-      .token-x-token-y-jing-v3-stx-special-sbtc
+      JING-MARKET
       (if (is-eq side ASSET_WSTX) WSTX_TOKEN SBTC_TOKEN)
       (if (is-eq side ASSET_WSTX) SBTC_TOKEN WSTX_TOKEN)
       amount limit-price))
@@ -332,15 +341,15 @@
     (let ((result (if (is-eq side ASSET_WSTX)
                       (try! (as-contract? ((with-stx amount))
                         (try! (contract-call?
-                          'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-swap-router-v-1-1
+                          DLMM_ROUTER
                           swap-x-for-y-simple-multi
-                          'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15
+                          DLMM_POOL_STX_SBTC
                           WSTX_TOKEN SBTC_TOKEN amount min-out))))
                       (try! (as-contract? ((with-ft SBTC_TOKEN ASSET_SBTC amount))
                         (try! (contract-call?
-                          'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-swap-router-v-1-1
+                          DLMM_ROUTER
                           swap-y-for-x-simple-multi
-                          'SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15
+                          DLMM_POOL_STX_SBTC
                           WSTX_TOKEN SBTC_TOKEN amount min-out)))))))
       (try! (contract-call? .jing-core log-bitflow-swap
         msg-hash

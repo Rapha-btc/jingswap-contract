@@ -46,7 +46,11 @@
 (use-trait reserve-trait .reserve-trait.reserve-trait)
 
 (define-constant SBTC 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
-(define-constant JING-MARKET 'SPV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RCJDC22.sbtc-stx-0-jing-v2)
+;; SIP-010 asset name for sBTC's `with-ft` clause and trait arg name
+;; passed to the v3 market.
+(define-constant ASSET-SBTC "sbtc-token")
+;; The Jing market this snpl deposits into. v3 sBTC/STX, sBTC = token-x.
+(define-constant JING-MARKET .token-x-token-y-jing-v3-stx-special-sbtc)
 ;; Sentinel. Pre-init the borrower and reserve vars equal SAINT, which
 ;; no real contract can match; any borrow/repay/seize attempt fails the
 ;; reserve assert until `initialize` is called.
@@ -110,7 +114,8 @@
     ERR-LOAN-NOT-FOUND))
 
 (define-private (our-sbtc-in-jing (cycle uint))
-  (contract-call? JING-MARKET get-sbtc-deposit cycle current-contract))
+  (contract-call? JING-MARKET
+    get-token-x-deposit cycle current-contract))
 
 ;; ---------- Initialization ----------
 
@@ -180,13 +185,15 @@
 ;; both the swap proceeds (STX) and any rolled sBTC to seize.
 (define-public (swap-deposit (loan-id uint) (limit-price uint))
   (let ((loan (unwrap! (map-get? loans loan-id) ERR-LOAN-NOT-FOUND))
-        (jing-cycle (contract-call? JING-MARKET get-current-cycle))
+        (jing-cycle (contract-call? JING-MARKET
+                      get-current-cycle))
         (amount (get notional-sbtc loan)))
     (asserts! (is-eq tx-sender (var-get borrower)) ERR-NOT-BORROWER)
     (asserts! (is-eq (get status loan) STATUS-OPEN) ERR-BAD-STATUS)
     (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE)
-    (try! (as-contract? ((with-ft SBTC "sbtc-token" amount))
-      (try! (contract-call? JING-MARKET deposit-sbtc amount limit-price))))
+    (try! (as-contract? ((with-ft SBTC ASSET-SBTC amount))
+      (try! (contract-call? JING-MARKET
+              deposit-token-x amount limit-price SBTC ASSET-SBTC))))
     (map-set loans loan-id (merge loan {
       jing-cycle: jing-cycle,
       limit-price: limit-price
@@ -205,7 +212,8 @@
                   (>= burn-block-height (get deadline loan)))
               ERR-NOT-BORROWER)
     (try! (as-contract? ((with-all-assets-unsafe))
-      (try! (contract-call? JING-MARKET cancel-sbtc-deposit))))
+      (try! (contract-call? JING-MARKET
+              cancel-token-x-deposit SBTC ASSET-SBTC))))
     (try! (contract-call? .jing-core log-snpl-cancel-swap loan-id))
     (ok true)))
 
@@ -215,8 +223,9 @@
     (asserts! (is-eq (get status loan) STATUS-OPEN) ERR-BAD-STATUS)
     (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE)
     (map-set loans loan-id (merge loan { limit-price: limit-price }))
-    (try! (as-contract? ()
-      (try! (contract-call? JING-MARKET set-sbtc-limit limit-price))))
+    (try! (as-contract? ((with-all-assets-unsafe))
+      (try! (contract-call? JING-MARKET
+              set-token-x-limit limit-price))))
     (try! (contract-call? .jing-core log-snpl-set-swap-limit loan-id limit-price))
     (ok true)))
 
