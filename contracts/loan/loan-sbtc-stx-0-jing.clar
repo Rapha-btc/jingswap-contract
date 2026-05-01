@@ -223,7 +223,7 @@
     (asserts! (is-eq (get status loan) STATUS-OPEN) ERR-BAD-STATUS)
     (asserts! (< burn-block-height (get deadline loan)) ERR-PAST-DEADLINE)
     (map-set loans loan-id (merge loan { limit-price: limit-price }))
-    (try! (as-contract? ((with-all-assets-unsafe))
+    (try! (as-contract? ()
       (try! (contract-call? JING-MARKET
               set-token-x-limit limit-price))))
     (try! (contract-call? .jing-core log-snpl-set-swap-limit loan-id limit-price))
