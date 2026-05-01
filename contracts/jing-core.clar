@@ -45,9 +45,10 @@
 ;; tractable while distributing the trust away from the owner.
 (define-constant MAX_VALIDATORS u5)
 
-;; sBTC principal -- used by vault-side logs that still speak in
-;; (string-ascii 4) asset codes ("sbtc"/"stx"). Market-side logs are fully
-;; token-agnostic and don't reference this constant.
+;; sBTC principal -- referenced by reads (get-sbtc-equity) and as the
+;; convenience field on every vault-log print. The equity ledger itself
+;; is fully token-agnostic; vault- and market-side logs credit/debit
+;; whichever token principal the caller passes.
 (define-constant SBTC_TOKEN 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
 
 (define-data-var contract-owner principal tx-sender)
@@ -379,27 +380,48 @@
 ;; ====================================================================
 ;; Vault-side logs -- contract-caller is the vault
 ;; ====================================================================
-;; Still uses (string-ascii 4) asset codes because jing-vault-v1 callers
-;; pass "stx"/"sbtc". A future vault generalization can switch to token
-;; principals; the equity table is already keyed generically.
-;; VAULT LOGS
-(define-public (log-deposit (asset (string-ascii 4)) (amount uint))
+;;
+;; Fully token-agnostic on the wire AND in the ledger: callers pass token
+;; principals and equity is credited/debited per-token without any
+;; sBTC-special branch. The vault's bucket mirrors its actual balances
+;; in every token it holds; SBTC_TOKEN is just a convention for which
+;; principal to pass for sBTC, and `sbtc-equity` is included as a
+;; convenience field on every print for the dual-stacking indexer.
+;;
+;; Boundary semantics (mirror what markets do on settle):
+;;   log-deposit       : vault ingress (owner -> vault) -> credit token
+;;   log-withdraw      : vault egress (vault -> owner)  -> debit token
+;;   log-bitflow-swap  : vault leaves ecosystem on token-in, re-enters
+;;                       on token-out -> debit token-in, credit token-out
+;;   log-jing-deposit  : intra-ecosystem (vault -> registered market)
+;;                       -> NO equity delta; market settle path handles
+;;                          the actual transitions for registered vaults
+;;   log-cancel        : intra-ecosystem refund (market -> vault)
+;;                       -> NO equity delta; market log-refund-* runs
+;;   log-revoke        : pure event marker, no balance moves
+;;
+;; The contract-call dispatch in the vault stays pinned per-pair (no
+;; trait substitution); these logs just describe what happened so a single
+;; indexer can attribute events across vault templates (sbtc-stx,
+;; sbtc-usdcx, future pairs) without a schema migration.
+
+(define-public (log-deposit (token principal) (amount uint))
   (begin
     (try! (check-not-paused))
     (asserts! (is-registered contract-caller) ERR_NOT_AUTHORIZED)
-    (and (is-eq asset "sbtc") (credit SBTC_TOKEN contract-caller amount))
+    (credit token contract-caller amount)
     (print { event: "vault-deposit", vault: contract-caller,
-             asset: asset, amount: amount,
-             sbtc-equity: (get-token-equity SBTC_TOKEN contract-caller) })
+             token: token, amount: amount,
+             equity: (get-token-equity token contract-caller) })
     (ok true)))
 
-(define-public (log-withdraw (asset (string-ascii 4)) (amount uint))
+(define-public (log-withdraw (token principal) (amount uint))
   (begin
     (asserts! (is-registered contract-caller) ERR_NOT_AUTHORIZED)
-    (and (is-eq asset "sbtc") (debit SBTC_TOKEN contract-caller amount))
+    (debit token contract-caller amount)
     (print { event: "vault-withdraw", vault: contract-caller,
-             asset: asset, amount: amount,
-             sbtc-equity: (get-token-equity SBTC_TOKEN contract-caller) })
+             token: token, amount: amount,
+             equity: (get-token-equity token contract-caller)})
     (ok true)))
 
 (define-public (log-revoke (target-hash (buff 32)))
@@ -408,28 +430,38 @@
     (print { event: "vault-revoke", vault: contract-caller, target-hash: target-hash })
     (ok true)))
 
-(define-public (log-cancel (asset (string-ascii 4)))
+(define-public (log-cancel (market principal) (token-in principal))
+  ;; market is the market the vault is reclaiming from. token-in is
+  ;; whichever token the vault originally deposited and is now getting
+  ;; refunded.
   (begin
     (asserts! (is-registered contract-caller) ERR_NOT_AUTHORIZED)
-    (print { event: "vault-cancel", vault: contract-caller, asset: asset })
+    (print { event: "vault-cancel", vault: contract-caller,
+             market: market, token-in: token-in })
     (ok true)))
 
 (define-public (log-jing-deposit
     (msg-hash (buff 32))
-    (side (string-ascii 4))
+    (market principal)
+    (token-in principal)
+    (token-out principal)
     (amount uint)
     (limit-price uint))
   ;; Intra-ecosystem transfer (vault -> approved market). No equity delta
   ;; here; credit happened on vault ingress, debit happens on market
-  ;; cleared/refund.
+  ;; cleared/refund. market disambiguates which pair when a single vault
+  ;; template is bound to multiple markets in future. token-in is the
+  ;; deposited asset; token-out is the intended counterparty asset.
   (begin
     (try! (check-not-paused))
     (asserts! (is-registered contract-caller) ERR_NOT_AUTHORIZED)
     (print {
       event: "vault-jing-deposit",
       vault: contract-caller,
+      market: market,
       msg-hash: msg-hash,
-      side: side,
+      token-in: token-in,
+      token-out: token-out,
       amount: amount,
       limit-price: limit-price,
     })
@@ -437,30 +469,32 @@
 
 (define-public (log-bitflow-swap
     (msg-hash (buff 32))
-    (side (string-ascii 4))
+    (token-in principal)
+    (token-out principal)
     (amount uint)
     (limit-price uint)
-    (min-out uint))
-  ;; side="sbtc": vault spent sBTC to Bitflow -> debit(amount).
-  ;; side="stx":  vault received >= min-out sBTC from Bitflow -> credit(min-out).
-  ;; Conservative undercount; actual received may be marginally higher.
+    (out uint))
+  ;; Vault leaves the ecosystem on token-in side, re-enters on token-out
+  ;; side. Both legs update equity unconditionally so the vault's bucket
+  ;; mirrors actual on-chain balances. Caller passes the venue's exact
+  ;; `out` return value (xyk's dy/dx, router's (get out result)) -- not
+  ;; min-out -- so the credit is precise.
   (begin
     (try! (check-not-paused))
     (asserts! (is-registered contract-caller) ERR_NOT_AUTHORIZED)
-    (if (is-eq side "sbtc")
-      (debit SBTC_TOKEN contract-caller amount)
-      (if (is-eq side "stx")
-        (credit SBTC_TOKEN contract-caller min-out)
-        true))
+    (debit token-in contract-caller amount)
+    (credit token-out contract-caller out)
     (print {
       event: "vault-bitflow-swap",
       vault: contract-caller,
       msg-hash: msg-hash,
-      side: side,
+      token-in: token-in,
+      token-out: token-out,
       amount: amount,
       limit-price: limit-price,
-      min-out: min-out,
-      sbtc-equity: (get-token-equity SBTC_TOKEN contract-caller),
+      out: out,
+      equity-in: (get-token-equity token-in contract-caller),
+      equity-out: (get-token-equity token-out contract-caller),
     })
     (ok true)))
 

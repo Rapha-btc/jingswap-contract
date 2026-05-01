@@ -14,15 +14,21 @@
   }))))
 
 ;; `action` is "jing-deposit" or "bitflow-swap" (ASCII, up to 16 chars).
-;; `side` is "stx" (spending STX) or "sbtc" (spending sBTC).
-;; `limit-price` is STX-per-sBTC in 8-decimal precision:
-;;   - side="stx":  CEILING -- max STX/sBTC the owner will pay (buying sBTC)
-;;   - side="sbtc": FLOOR   -- min STX/sBTC the owner will accept (selling sBTC)
+;; `side` is the symbol of the token being spent. For sBTC/STX vaults
+;; that's "stx" or "sbtc"; for sBTC/USDCx vaults it's "usdcx" or "sbtc".
+;; Width is 8 to accommodate any reasonable token symbol; the SIP-018
+;; domain is bound to the calling vault, so side semantics never
+;; cross-contaminate.
+;; `limit-price` is the OTHER-token-per-sBTC in 8-decimal precision:
+;;   - side="<other>": CEILING -- max <other>/sBTC the owner will pay
+;;     (buying sBTC)
+;;   - side="sbtc":    FLOOR   -- min <other>/sBTC the owner will accept
+;;     (selling sBTC)
 ;; `auth-id` is a uniqueness salt (e.g. Date.now() in ms).
 ;; `expiry` is a Stacks block height after which the intent is dead.
 (define-read-only (build-intent-hash (details {
   action: (string-ascii 16),
-  side: (string-ascii 4),
+  side: (string-ascii 128),
   amount: uint,
   limit-price: uint,
   auth-id: uint,

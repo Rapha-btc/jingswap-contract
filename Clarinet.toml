@@ -24,10 +24,16 @@ contract_id = "SP1CGXWEAMG6P6FT04W66NVGJ7PQWMDAC19R7PJ0Y.wormhole-traits-v2"
 contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-pool-sbtc-stx-v-1-1"
 
 [[project.requirements]]
+contract_id = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.xyk-core-v-1-2"
+
+[[project.requirements]]
 contract_id = "SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15"
 
 [[project.requirements]]
 contract_id = "SP1PFR4V08H1RAZXREBGFFQ59WB739XM8VVGTFSEA.dlmm-core-v-1-1"
+
+[[project.requirements]]
+contract_id = "SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-swap-router-v-1-1"
 
 [[project.requirements]]
 contract_id = "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx"
@@ -95,8 +101,8 @@ path = "contracts/v3/token-x-token-y-jing-v3.clar"
 clarity_version = 5
 epoch = "3.4"
 
-[contracts.token-x-token-y-jing-v3-stx-sbtc]
-path = "contracts/v3/token-x-token-y-jing-v3-stx-sbtc.clar"
+[contracts.token-x-token-y-jing-v3-stx-special-sbtc]
+path = "contracts/v3/token-x-token-y-jing-v3-stx-special-sbtc.clar"
 clarity_version = 5
 epoch = "3.4"
 
@@ -148,6 +154,21 @@ epoch = "3.4"
 
 [contracts.test-trait-fold]
 path = "contracts/test-trait-fold.clar"
+clarity_version = 5
+epoch = "3.4"
+
+[contracts.jing-vault-auth]
+path = "contracts/jing-vault-auth.clar"
+clarity_version = 5
+epoch = "3.4"
+
+[contracts.jing-vault-v1]
+path = "contracts/jing-vault-v1.clar"
+clarity_version = 5
+epoch = "3.4"
+
+[contracts.jing-vault-v1-sbtc-usdcx]
+path = "contracts/jing-vault-v1-sbtc-usdcx.clar"
 clarity_version = 5
 epoch = "3.4"
 
